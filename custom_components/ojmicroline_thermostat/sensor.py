@@ -235,6 +235,12 @@ async def async_setup_entry(
 
     for idx in coordinator.data.keys():  # noqa: SIM118
         for info in SENSOR_TYPES:
+            # WG4 provides no energy history; a synthetic zero is not usage.
+            if (
+                info.entity_description.key == "energy_usage"
+                and coordinator.data[idx].model == "UWG4"
+            ):
+                continue
             # Different models of thermostat support different sensors;
             # skip creating entities if the value is None. The raw attribute
             # is checked too, so that sensors that only have a value in a
@@ -302,7 +308,8 @@ class OJMicrolineSensor(OJMicrolineEntity, SensorEntity):
             True if the sensor is available, false otherwise.
 
         """
-        return self.coordinator.data[self.idx].online
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        return super().available and thermostat is not None and thermostat.online
 
     @property
     def native_value(self) -> Any | None:
@@ -313,9 +320,11 @@ class OJMicrolineSensor(OJMicrolineEntity, SensorEntity):
             The current state value of the sensor.
 
         """
-        thermostat = self.coordinator.data[self.idx]
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        if not self.available or thermostat is None:
+            return None
         val = _get_value(thermostat, self.entity_description, self.value_getter)
-        if self.formatter is not None:
+        if self.formatter is not None and val is not None:
             return self.formatter(val)
         return val
 
@@ -339,13 +348,25 @@ class OJMicrolineScheduleSensor(OJMicrolineEntity, SensorEntity):
         self._attr_unique_id = f"{idx}_schedule"
 
     @property
+    def available(self) -> bool:
+        """Require current data from an online thermostat."""
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        return super().available and thermostat is not None and thermostat.online
+
+    @property
     def native_value(self) -> float | None:
         """Return the temperature the schedule prescribes now."""
-        schedule = self.coordinator.data[self.idx].schedule
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        if not self.available or thermostat is None:
+            return None
+        schedule = thermostat.schedule
         return None if schedule is None else current_setpoint(schedule, dt_util.now())
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return the active events per weekday."""
-        schedule = self.coordinator.data[self.idx].schedule
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        if not self.available or thermostat is None:
+            return None
+        schedule = thermostat.schedule
         return None if schedule is None else schedule_attributes(schedule)

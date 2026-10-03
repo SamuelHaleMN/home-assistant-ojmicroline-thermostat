@@ -29,6 +29,11 @@ class OJMicrolineEntity(CoordinatorEntity[OJMicrolineDataUpdateCoordinator], Ent
         self.idx = idx
 
     @property
+    def available(self) -> bool:
+        """Require a current poll containing this thermostat."""
+        return super().available and self.idx in (self.coordinator.data or {})
+
+    @property
     def device_info(self) -> dict[str, Any]:
         """Return information to link this entity with the correct device.
 

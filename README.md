@@ -20,8 +20,21 @@ It has been tested and developed on the following models:
 | UWG4             |
 | WCD5             |
 
-After installation you can add the thermostat through the integration page. Currently setting a preset mode and temperature is supported. Adjusting
-the HVAC mode will (re)set it to the schedule preset.
+After installation you can add the thermostat through the integration page. Currently setting a preset mode and temperature is supported. Only the heat HVAC mode is supported. Use the schedule/manual presets for regulation mode; unsupported OFF/AUTO requests fail visibly.
+
+## Warm Tiles owner release
+
+This fork is based on upstream 1.5.0 and keeps its pinned `ojmicroline-thermostat==3.6.0` dependency. Release `1.5.0+warmtiles.1` adds a small WG4 reliability adapter while WD5 continues to use the upstream client.
+
+For ESW WiFi Warm Tiles ColorTouch, select **WG4 series**, host **warmtiles.mythermostat.info** (without `https://`), and **Application 13**. The default temperature policy is manual. WG4 uses 60-second cloud polling in this release; it does not depend on the draft WG4 push implementation.
+
+If migrating this owner's legacy `schluter` entry, first back up HA and disable that entry. Select **Migrate existing Warm Tiles** and choose the saved entry. Credentials are read inside HA and validated against the Warm Tiles cloud. Installation and migration issue no thermostat commands. Rename legacy climate entity IDs to recorded backup names before assigning the desired IDs to the new entities; preserve device/area and external references separately.
+
+The adapter renews expired read sessions once, rejects invalid/empty login responses, serializes authentication and device commands, and bounds complete HTTP/JSON operations. Writes are never replayed automatically after an uncertain response. Rejected commands and failed cloud-readback verification reach the caller. Cloud readback does not prove physical device acknowledgement. Offline/missing devices and failed polling are unavailable, and unsupported WG4 energy is not exposed as a fabricated zero total.
+
+True WG4 remote OFF, schedule editing and vacation control are not established here. Thermostat hardware, local protection settings and stored schedules remain under the device's control. Do not translate OFF into manual heating or a low setpoint.
+
+Before HA or integration upgrades, qualify native setup, authentication, climate units/modes, missing-device handling and a bounded canary; retain the prior versioned artifact. Retire local patches only after an upstream release passes the same checks. This release is owned by SamuelHaleMN; see upstream for general OJ platform development.
 
 ## Requirements
 

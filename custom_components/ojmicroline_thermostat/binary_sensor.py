@@ -98,6 +98,16 @@ class OJMicrolineBinarySensor(OJMicrolineEntity, BinarySensorEntity):
         self._attr_name = f"{coordinator.data[idx].name} {entity_description.name}"
 
     @property
+    def available(self) -> bool:
+        """Keep connectivity readable offline, with current account data only."""
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        return (
+            super().available
+            and thermostat is not None
+            and (self.entity_description.key == "online" or thermostat.online)
+        )
+
+    @property
     def is_on(self) -> bool | None:
         """Return the status of the binary sensor.
 
@@ -106,4 +116,7 @@ class OJMicrolineBinarySensor(OJMicrolineEntity, BinarySensorEntity):
             True if the sensor is on, false if not, unknown if it can't be reached.
 
         """
-        return getattr(self.coordinator.data[self.idx], self.entity_description.key)
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        if not self.available or thermostat is None:
+            return None
+        return getattr(thermostat, self.entity_description.key)

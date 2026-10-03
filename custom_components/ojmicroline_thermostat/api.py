@@ -5,9 +5,9 @@ from typing import Any
 
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from ojmicroline_thermostat import WD5API, WG4API, OJMicroline
+from ojmicroline_thermostat import WD5API, OJMicroline
 
 from .const import (
     CONF_APPLICATION,
@@ -17,6 +17,7 @@ from .const import (
     MODEL_WD5_SERIES,
     MODEL_WG4_SERIES,
 )
+from .reliability import ReliableOJMicroline, ReliableWG4API
 
 
 def oj_microline_from_config_entry_data(
@@ -28,7 +29,8 @@ def oj_microline_from_config_entry_data(
 
 def oj_microline_from_api(api: Any, hass: HomeAssistant) -> OJMicroline:
     """Construct an OJMicroline object around an already created API object."""
-    return OJMicroline(api=api, session=async_create_clientsession(hass))
+    client = ReliableOJMicroline if isinstance(api, ReliableWG4API) else OJMicroline
+    return client(api=api, session=async_get_clientsession(hass))
 
 
 def api_from_config_entry_data(data: Mapping[str, Any]) -> Any:
@@ -49,7 +51,7 @@ def api_from_config_entry_data(data: Mapping[str, Any]) -> Any:
             **extra_args,
         )
     if model == MODEL_WG4_SERIES:
-        return WG4API(
+        return ReliableWG4API(
             username=data[CONF_USERNAME],
             password=data[CONF_PASSWORD],
             application=data.get(CONF_APPLICATION, DEFAULT_WG4_APPLICATION),

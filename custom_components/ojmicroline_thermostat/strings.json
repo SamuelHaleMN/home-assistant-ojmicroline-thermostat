@@ -7,7 +7,7 @@
                     "model": "Model"
                 },
                 "data_description": {
-                    "model": "The WD5 series includes OWD5 and MWD5; the WG4 series includes UWG4 and AWG4."
+                    "model": "The WD5 series includes OWD5 and MWD5; the WG4 series includes UWG4, AWG4 and Warm Tiles ESW. Select Migrate existing Warm Tiles to reuse an existing account in Home Assistant."
                 }
             },
             "wd5": {
@@ -33,7 +33,21 @@
                 },
                 "data_description": {
                     "host": "Leave blank to use the default. If specified, omit the https://.",
-                    "application": "The application code sent on login. Standard WG4 thermostats use 2 (the default); Danfoss LX (lxwifi.danfoss.us) requires 4."
+                    "application": "The application code sent on login. Standard WG4 thermostats use 2; Danfoss LX uses 4; Warm Tiles ESW (warmtiles.mythermostat.info) uses 13."
+                }
+            },
+            "reauth_confirm": {
+                "title": "Reauthenticate",
+                "description": "Enter the current password for this thermostat account. Your existing cloud settings and devices will be preserved.",
+                "data": {
+                    "password": "Password"
+                }
+            },
+            "legacy": {
+                "title": "Migrate existing Warm Tiles",
+                "description": "Disable your existing Warm Tiles integration, then select its account to add it to OJ Microline. Credentials stay in Home Assistant. Thermostat settings are preserved.",
+                "data": {
+                    "legacy_entry_id": "Existing Warm Tiles account"
                 }
             }
         },
@@ -44,7 +58,14 @@
             "unknown": "Unexpected error"
         },
         "abort": {
-            "already_configured": "Your credentials are already configured."
+            "already_configured": "Your credentials are already configured.",
+            "reauth_successful": "Authentication was successful.",
+            "invalid_legacy_entry": "The selected legacy Warm Tiles integration could not be imported.",
+            "invalid_auth": "The account credentials could not be authenticated.",
+            "timeout": "The thermostat cloud timed out. The legacy integration was not changed.",
+            "connection_failed": "The thermostat cloud could not be reached. The legacy integration was not changed.",
+            "unknown": "The thermostat cloud returned an unexpected error. The legacy integration was not changed.",
+            "legacy_not_disabled": "Disable the existing Warm Tiles integration before migrating, so only one integration can control these thermostats."
         }
     },
     "entity": {
@@ -86,8 +107,11 @@
             "init": {
                 "description": "Set default options when changing the thermostat temperature.",
                 "data": {
-                    "use_comfort_mode": "Set the regulation to comfort mode when changing the temperature.",
+                    "use_comfort_mode": "Enable comfort mode",
                     "comfort_mode_duration": "The duration in minutes the comfort mode should be enabled."
+                },
+                "data_description": {
+                    "use_comfort_mode": "Allow the comfort preset and use it for temperature changes while following a schedule. Existing manual or comfort mode is preserved."
                 }
             }
         }
@@ -121,7 +145,7 @@
                 },
                 "events": {
                     "name": "Events",
-                    "description": "The day's events in order, each with a time (HH:MM) and a temperature (5-40 °C)."
+                    "description": "The day's events in order, each with a time (HH:MM) and a temperature (5-40 \u00b0C)."
                 }
             }
         }

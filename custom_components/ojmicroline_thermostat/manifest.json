@@ -11,11 +11,11 @@
         "http",
         "recorder"
     ],
-    "documentation": "https://github.com/robbinjanssen/home-assistant-ojmicroline-thermostat",
+    "documentation": "https://github.com/SamuelHaleMN/home-assistant-ojmicroline-thermostat",
     "iot_class": "cloud_push",
-    "issue_tracker": "https://github.com/robbinjanssen/home-assistant-ojmicroline-thermostat/issues",
+    "issue_tracker": "https://github.com/SamuelHaleMN/home-assistant-ojmicroline-thermostat/issues",
     "requirements": [
         "ojmicroline-thermostat==3.6.0"
     ],
-    "version": "1.5.0"
+    "version": "1.5.0+warmtiles.1"
 }

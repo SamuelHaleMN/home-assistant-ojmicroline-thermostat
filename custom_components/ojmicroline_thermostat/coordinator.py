@@ -69,6 +69,7 @@ class OJMicrolineDataUpdateCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name=DOMAIN,
+            config_entry=entry,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
             request_refresh_debouncer=Debouncer(
                 hass, _LOGGER, cooldown=REFRESH_COOLDOWN, immediate=True
