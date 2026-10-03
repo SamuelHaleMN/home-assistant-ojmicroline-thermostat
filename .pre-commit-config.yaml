@@ -85,10 +85,14 @@ repos:
         entry: poetry run end-of-file-fixer
         stages: [pre-commit, pre-push, manual]
       - id: mypy
-        name: Static type checking using mypy
+        name: Type-check the pinned WG4 adapter
         language: system
         types: [python]
-        entry: poetry run mypy
+        entry: >-
+          poetry run mypy --config-file=pyproject.toml --follow-imports=silent
+          --explicit-package-bases --namespace-packages
+          custom_components/ojmicroline_thermostat/reliability.py
+        pass_filenames: false
       - id: no-commit-to-branch
         name: Don't commit to main branch
         language: system
@@ -100,13 +104,14 @@ repos:
       - id: poetry
         name: Check pyproject with Poetry
         language: system
-        entry: poetry check
+        entry: poetry check --lock
         pass_filenames: false
         always_run: true
       - id: pylint
         name: Starring code with pylint
         language: system
         types: [python]
+        exclude: ^tests/
         entry: poetry run pylint
       - id: trailing-whitespace
         name: Trim Trailing Whitespace

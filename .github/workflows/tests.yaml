@@ -1,0 +1,48 @@
+---
+name: WG4 regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wg4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Poetry
+        run: python -m pip install poetry==2.3.2
+
+      - name: Install locked development dependencies
+        run: poetry install --no-interaction
+
+      - name: Verify runtime client pin
+        run: |
+          poetry run python -c "from importlib.metadata import version; assert version('ojmicroline-thermostat') == '3.6.0'"
+
+      - name: Run isolated WG4 regressions
+        run: poetry run pytest -q tests
+
+      - name: Check production and test lint
+        run: poetry run ruff check custom_components tests scripts
+
+      - name: Check formatting
+        run: poetry run ruff format --check custom_components tests scripts
+
+      - name: Check WG4 adapter types
+        run: |
+          poetry run mypy --config-file=pyproject.toml --follow-imports=silent \
+            --explicit-package-bases --namespace-packages \
+            custom_components/ojmicroline_thermostat/reliability.py

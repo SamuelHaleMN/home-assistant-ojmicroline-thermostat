@@ -6,8 +6,10 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from test_warmtiles_climate_flow import modules as _boundary_fixture
 
-from test_warmtiles_climate_flow import modules as boundary_modules
+# Explicit alias registers the shared pytest fixture without an unused import.
+boundary_modules = _boundary_fixture
 
 
 @pytest.fixture
@@ -156,7 +158,9 @@ def test_connectivity_can_report_false_while_heating_is_unavailable(sensor_modul
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model,expected_energy", [("UWG4", False), ("OWD5", True)])
+@pytest.mark.parametrize(
+    ("model", "expected_energy"), [("UWG4", False), ("OWD5", True)]
+)
 async def test_energy_created_only_when_api_provides_it(
     sensor_modules, model, expected_energy
 ):

@@ -1,19 +1,18 @@
 """Focused HA boundary tests using isolated HA interface doubles."""
 
 import asyncio
-from datetime import datetime, UTC
-from enum import IntFlag, StrEnum
 import importlib
-from pathlib import Path
 import sys
+from datetime import UTC, datetime
+from enum import IntFlag, StrEnum
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from ojmicroline_thermostat import OJMicrolineAuthError, OJMicrolineError
 
 SOURCE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SOURCE.parent / "ojmicroline_thermostat-3.6.0-py3-none-any.whl"))
-from ojmicroline_thermostat import OJMicrolineAuthError, OJMicrolineError
 
 
 @pytest.fixture
@@ -30,6 +29,9 @@ def modules(monkeypatch):
         pass
 
     class ServiceValidationError(HomeAssistantError):
+        pass
+
+    class ConfigEntryAuthFailedError(HomeAssistantError):
         pass
 
     class HVACMode(StrEnum):
@@ -83,6 +85,9 @@ def modules(monkeypatch):
         def async_create_entry(self, **kwargs):
             return {"type": "create_entry", **kwargs}
 
+    class OptionsFlowWithReload:
+        automatic_reload = True
+
     for name in (
         "homeassistant",
         "homeassistant.components",
@@ -93,7 +98,7 @@ def modules(monkeypatch):
         "homeassistant.config_entries",
         ConfigEntry=object,
         ConfigFlow=ConfigFlow,
-        OptionsFlow=object,
+        OptionsFlowWithReload=OptionsFlowWithReload,
     )
     module(
         "homeassistant.const",
@@ -112,6 +117,7 @@ def modules(monkeypatch):
         "homeassistant.exceptions",
         HomeAssistantError=HomeAssistantError,
         ServiceValidationError=ServiceValidationError,
+        ConfigEntryAuthFailed=ConfigEntryAuthFailedError,
     )
     module(
         "homeassistant.components.climate",
@@ -127,8 +133,14 @@ def modules(monkeypatch):
         PRESET_ECO="eco",
     )
     module(
-        "homeassistant.helpers.update_coordinator", CoordinatorEntity=CoordinatorEntity
+        "homeassistant.helpers.update_coordinator",
+        CoordinatorEntity=CoordinatorEntity,
+        DataUpdateCoordinator=object,
+        UpdateFailed=HomeAssistantError,
     )
+    module("homeassistant.helpers.aiohttp_client", async_get_clientsession=Mock())
+    module("homeassistant.helpers.debounce", Debouncer=object)
+    module("homeassistant.util", dt=SimpleNamespace())
     module("homeassistant.helpers.entity", DeviceInfo=dict)
     module("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     module(
@@ -145,15 +157,18 @@ def modules(monkeypatch):
     module(
         "custom_components.ojmicroline_thermostat.api",
         oj_microline_from_config_entry_data=Mock(),
+        api_from_config_entry_data=Mock(),
+        oj_microline_from_api=Mock(),
     )
-    module(
-        "custom_components.ojmicroline_thermostat.coordinator",
-        OJMicrolineDataUpdateCoordinator=object,
-    )
+    module("custom_components.ojmicroline_thermostat.energy", EnergyStatistics=object)
+    module("custom_components.ojmicroline_thermostat.push", WD5PushClient=object)
     module(
         "custom_components.ojmicroline_thermostat.helpers",
         target_temperature=lambda thermostat: thermostat.set_point_temperature,
         wd5_date=lambda value: value.date() if value else None,
+        format_wd5=Mock(),
+        format_wd5_date=Mock(),
+        is_wd5=lambda thermostat: thermostat.model == "OWD5",
     )
     module(
         "custom_components.ojmicroline_thermostat.schedule",
@@ -162,7 +177,7 @@ def modules(monkeypatch):
         ScheduleError=ValueError,
         set_days=Mock(),
     )
-    for name in ("climate", "config_flow", "const"):
+    for name in ("climate", "config_flow", "const", "coordinator"):
         monkeypatch.delitem(
             sys.modules,
             f"custom_components.ojmicroline_thermostat.{name}",
@@ -176,9 +191,13 @@ def modules(monkeypatch):
     flow = importlib.import_module(
         "custom_components.ojmicroline_thermostat.config_flow"
     )
+    coordinator = importlib.import_module(
+        "custom_components.ojmicroline_thermostat.coordinator"
+    )
     return SimpleNamespace(
         climate=climate,
         flow=flow,
+        coordinator=coordinator,
         HomeAssistantError=HomeAssistantError,
         ServiceValidationError=ServiceValidationError,
         HVACMode=HVACMode,
@@ -199,17 +218,22 @@ def entity(modules, monkeypatch):
         min_temperature=500,
         max_temperature=4000,
         set_point_temperature=1888,
+        energy=[],
         comfort_end_time=datetime.now(UTC),
         vacation_begin_time=datetime.now(UTC),
         vacation_end_time=datetime.now(UTC),
     )
-    coordinator = SimpleNamespace(
-        data={"fixture-id": thermostat},
-        last_update_success=True,
-        wd5_api=None,
-        async_set_regulation_mode=AsyncMock(),
-        async_change_vacation=AsyncMock(),
-        api=SimpleNamespace(get_thermostats=AsyncMock(return_value=[thermostat])),
+    coordinator = object.__new__(modules.coordinator.OJMicrolineDataUpdateCoordinator)
+    coordinator.data = {"fixture-id": thermostat}
+    coordinator.last_update_success = True
+    coordinator.wd5_api = None
+    coordinator._account_lock = asyncio.Lock()
+    coordinator._verified_commands = 0
+    coordinator.async_set_regulation_mode = AsyncMock()
+    coordinator.async_change_vacation = AsyncMock()
+    coordinator.async_request_delayed_refresh = AsyncMock()
+    coordinator.api = SimpleNamespace(
+        get_thermostats=AsyncMock(return_value=[thermostat])
     )
     thermostat.get_target_temperature = lambda: thermostat.set_point_temperature
     thermostat.get_current_temperature = lambda: 2069
@@ -229,13 +253,11 @@ def entity(modules, monkeypatch):
         await real_sleep(0)
 
     monkeypatch.setattr(modules.climate.asyncio, "sleep", fast_sleep)
-    entity = modules.climate.OJMicrolineThermostat(coordinator, "fixture-id", {})
-    entity._async_delayed_request_refresh = AsyncMock()
-    return entity
+    return modules.climate.OJMicrolineThermostat(coordinator, "fixture-id", {})
 
 
 @pytest.mark.parametrize(
-    "poll_ok,present,online,expected",
+    ("poll_ok", "present", "online", "expected"),
     [
         (True, True, True, True),
         (False, True, True, False),
@@ -271,7 +293,7 @@ async def test_preset_failures_reach_ha_caller(entity, modules):
     )
     with pytest.raises(modules.HomeAssistantError, match="preset command failed"):
         await entity.async_set_preset_mode("schedule")
-    entity._async_delayed_request_refresh.assert_not_awaited()
+    entity.coordinator.async_request_delayed_refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -286,7 +308,7 @@ async def test_invalid_temperature_cannot_reach_api(entity, modules, temperature
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode,comfort_default,expected",
+    ("mode", "comfort_default", "expected"),
     [(3, True, 3), (2, False, 2), (1, True, 2), (1, False, 3)],
 )
 async def test_temperature_preserves_manual_and_comfort_mode(
@@ -483,7 +505,7 @@ async def test_write_confirmed_by_direct_fresh_readback(entity):
     await entity.async_set_temperature(temperature=19.38)
     entity.coordinator.api.get_thermostats.assert_awaited_once()
     entity.coordinator.async_set_updated_data.assert_called_once()
-    entity._async_delayed_request_refresh.assert_not_awaited()
+    entity.coordinator.async_request_delayed_refresh.assert_not_awaited()
     assert entity.target_temperature == 19.38
 
 
@@ -495,11 +517,11 @@ async def test_accepted_but_stale_readback_is_unconfirmed_without_post_retry(
     with pytest.raises(modules.HomeAssistantError, match="not confirmed"):
         await entity.async_set_temperature(temperature=19.38)
     entity.coordinator.async_set_regulation_mode.assert_awaited_once()
-    assert entity.coordinator.api.get_thermostats.await_count == 6
+    assert entity.coordinator.api.get_thermostats.await_count == 3
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing,online", [(True, True), (False, False)])
+@pytest.mark.parametrize(("missing", "online"), [(True, True), (False, False)])
 async def test_missing_or_offline_readback_is_unconfirmed(
     entity, modules, missing, online
 ):
@@ -596,13 +618,13 @@ async def test_queued_temperature_uses_preceding_confirmed_preset(entity):
 async def test_waiting_for_held_command_lock_times_out_without_post(
     entity, modules, monkeypatch
 ):
-    monkeypatch.setattr(modules.climate, "COMMAND_TIMEOUT", 0.001)
-    await entity._command_lock.acquire()
+    monkeypatch.setattr(modules.coordinator, "COMMAND_TIMEOUT", 0.001)
+    await entity.coordinator._account_lock.acquire()
     try:
         with pytest.raises(modules.HomeAssistantError, match="timed out"):
             await entity.async_set_temperature(temperature=19)
     finally:
-        entity._command_lock.release()
+        entity.coordinator._account_lock.release()
     entity.coordinator.async_set_regulation_mode.assert_not_awaited()
     entity.coordinator.api.get_thermostats.assert_not_awaited()
 
@@ -621,3 +643,33 @@ async def test_comfort_requires_opt_in_without_changing_existing_mode(entity, mo
     assert "comfort" in entity.preset_modes
     await entity.async_set_preset_mode("comfort")
     entity.coordinator.async_set_regulation_mode.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wd5_write_preserves_stock_refresh_and_avoids_full_readback(entity):
+    """WG4 verification must not replace WD5's push and energy-aware state."""
+    entity.coordinator.wd5_api = object()
+    await entity.async_set_temperature(temperature=19)
+    entity.coordinator.async_set_regulation_mode.assert_awaited_once()
+    entity.coordinator.async_request_delayed_refresh.assert_awaited_once()
+    entity.coordinator.api.get_thermostats.assert_not_awaited()
+    entity.coordinator.async_set_updated_data.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wd5_rejected_write_never_requests_success_refresh(entity, modules):
+    """Retain a visible WD5 error without pretending the write succeeded."""
+    entity.coordinator.wd5_api = object()
+    entity.coordinator.async_set_regulation_mode.side_effect = OJMicrolineError(
+        "synthetic rejection"
+    )
+    with pytest.raises(modules.HomeAssistantError, match="temperature command failed"):
+        await entity.async_set_temperature(temperature=19)
+    entity.coordinator.async_request_delayed_refresh.assert_not_awaited()
+    entity.coordinator.api.get_thermostats.assert_not_awaited()
+
+
+def test_wd5_retains_comfort_and_vacation_capabilities(entity):
+    """WG4 capability restrictions must not hide supported WD5 presets."""
+    entity.coordinator.wd5_api = object()
+    assert entity.preset_modes == ["schedule", "comfort", "manual", "vacation"]

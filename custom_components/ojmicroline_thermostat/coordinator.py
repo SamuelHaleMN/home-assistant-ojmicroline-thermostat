@@ -3,9 +3,10 @@
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from math import ceil
 from time import monotonic
-from typing import Any
+from typing import Any, override
 
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
@@ -49,12 +50,19 @@ from .const import (
 from .energy import EnergyStatistics
 from .helpers import format_wd5, format_wd5_date, is_wd5
 from .push import WD5PushClient
+from .reliability import ReliableWG4API
 
 _LOGGER = logging.getLogger(__name__)
+COMMAND_TIMEOUT = 90.0
+WG4_UPDATE_INTERVAL = 300
+VERIFY_TIMEOUT = 30.0
+VERIFY_DELAYS = (4, 8, 12)
 
 
 class OJMicrolineDataUpdateCoordinator(DataUpdateCoordinator):
     """Define an object to fetch data."""
+
+    data: dict[str, Thermostat]
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Class to manage fetching OJ Microline data.
@@ -77,12 +85,132 @@ class OJMicrolineDataUpdateCoordinator(DataUpdateCoordinator):
         )
         model_api = api_from_config_entry_data(entry.data)
         self._model_api = model_api
+        self._account_lock = asyncio.Lock()
+        self._poll_successes = 0
+        self._poll_failures = 0
+        self._last_poll_success: str | None = None
+        self._last_poll_error: str | None = None
+        self._verified_commands = 0
+        if isinstance(model_api, ReliableWG4API):
+            self.update_interval = timedelta(seconds=WG4_UPDATE_INTERVAL)
         self._energy_updated: float | None = None
         self.wd5_api: WD5API | None = (
             model_api if isinstance(model_api, WD5API) else None
         )
         self.api = oj_microline_from_api(model_api, hass)
         self.energy = EnergyStatistics(hass, self)
+
+    @override
+    async def _async_refresh(
+        self,
+        log_failures: bool = True,
+        raise_on_auth_failed: bool = False,
+        scheduled: bool = False,
+        raise_on_entry_error: bool = False,
+    ) -> None:
+        """Serialize WG4 polls through publication, not only their HTTP fetch.
+
+        HA assigns the result and notifies listeners outside _async_update_data.
+        Holding the account lock around that complete native refresh prevents a
+        delayed poll/readback from overwriting a different device's new state.
+        """
+        if isinstance(self._model_api, ReliableWG4API):
+            async with self._account_lock:
+                await super()._async_refresh(
+                    log_failures, raise_on_auth_failed, scheduled, raise_on_entry_error
+                )
+            return
+        await super()._async_refresh(
+            log_failures, raise_on_auth_failed, scheduled, raise_on_entry_error
+        )
+
+    async def async_verified_command(  # pylint: disable=too-many-arguments
+        self,
+        idx: str,
+        regulation_mode: int | None,
+        temperature: int | None = None,
+        duration: int | None = None,
+        *,
+        use_comfort_mode: bool = False,
+    ) -> None:
+        """Apply one WG4 command and publish conservatively verified cloud state."""
+        if self.wd5_api is not None:
+            msg = "Verified account commands apply only to WG4 thermostats."
+            raise ServiceValidationError(msg)
+        try:
+            async with asyncio.timeout(COMMAND_TIMEOUT), self._account_lock:
+                resource = (self.data or {}).get(idx)
+                if (
+                    not self.last_update_success
+                    or resource is None
+                    or not resource.online
+                ):
+                    msg = "The thermostat is unavailable."
+                    raise HomeAssistantError(msg)
+                mode = regulation_mode
+                if mode is None:
+                    mode = resource.regulation_mode
+                    if mode not in {REGULATION_MANUAL, REGULATION_COMFORT}:
+                        mode = (
+                            REGULATION_COMFORT
+                            if use_comfort_mode
+                            else REGULATION_MANUAL
+                        )
+                await self.async_set_regulation_mode(
+                    resource, mode, temperature=temperature, duration=duration
+                )
+                msg = (
+                    "The command was accepted, but matching cloud state "
+                    "was not confirmed."
+                )
+                try:
+                    async with asyncio.timeout(VERIFY_TIMEOUT):
+                        for delay in VERIFY_DELAYS:
+                            await asyncio.sleep(delay)
+                            inventory = await self.api.get_thermostats()
+                            fresh = {item.serial_number: item for item in inventory}
+                            self.async_set_updated_data(fresh)
+                            current = fresh.get(idx)
+                            if current is None or not current.online:
+                                raise HomeAssistantError(msg)
+                            if current.regulation_mode != mode:
+                                continue
+                            if (
+                                temperature is not None
+                                and current.get_target_temperature() != temperature
+                            ):
+                                continue
+                            self._verified_commands += 1
+                            return
+                except (TimeoutError, OJMicrolineError) as error:
+                    raise HomeAssistantError(msg) from error
+                raise HomeAssistantError(msg)
+        except TimeoutError as error:
+            msg = "The thermostat command timed out; its state was not confirmed."
+            raise HomeAssistantError(msg) from error
+
+    def diagnostic_status(self) -> dict[str, Any]:
+        """Return operational counts without account/device identifiers or state."""
+        data = self.data or {}
+        return {
+            "last_update_success": self.last_update_success,
+            "last_successful_poll_utc": self._last_poll_success,
+            "last_poll_error_type": self._last_poll_error,
+            "poll_successes": self._poll_successes,
+            "poll_failures": self._poll_failures,
+            "poll_interval_seconds": self.update_interval.total_seconds()
+            if self.update_interval
+            else None,
+            "inventory_device_count": len(data),
+            "inventory_online_count": sum(item.online for item in data.values()),
+            "verified_command_count": self._verified_commands,
+            "authentication_count": getattr(
+                self._model_api, "authentication_count", None
+            ),
+            "rate_limit_remaining_seconds": ceil(
+                getattr(self.api, "rate_limit_remaining", 0)
+            ),
+        }
 
     async def _async_update_data(self) -> dict[str, Thermostat]:
         """Fetch data from API endpoint.
@@ -104,13 +232,26 @@ class OJMicrolineDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             async with async_timeout.timeout(API_TIMEOUT):
                 thermostats = await self._async_fetch_thermostats()
-                return {resource.serial_number: resource for resource in thermostats}
+                result = {resource.serial_number: resource for resource in thermostats}
+                self._poll_successes += 1
+                self._last_poll_success = datetime.now(UTC).isoformat()
+                self._last_poll_error = None
+                return result
 
         except OJMicrolineAuthError as error:
+            self._poll_failures += 1
+            self._last_poll_error = type(error).__name__
             raise ConfigEntryAuthFailed from error
 
         except OJMicrolineError as error:
-            raise UpdateFailed(error) from error
+            self._poll_failures += 1
+            self._last_poll_error = type(error).__name__
+            retry_after = ceil(getattr(self.api, "rate_limit_remaining", 0))
+            raise UpdateFailed(error, retry_after=retry_after or None) from error
+        except TimeoutError:
+            self._poll_failures += 1
+            self._last_poll_error = "TimeoutError"
+            raise
 
     async def _async_fetch_thermostats(self) -> list[Thermostat]:
         """Fetch the thermostats, reusing recent energy usage where possible.

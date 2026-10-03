@@ -71,7 +71,6 @@ VENDOR_TO_HA_STATE = {
     REGULATION_ECO: PRESET_ECO,
 }
 HA_TO_VENDOR_STATE = {v: k for k, v in VENDOR_TO_HA_STATE.items()}
-COMMAND_TIMEOUT = 45.0
 
 
 async def async_setup_entry(
@@ -308,7 +307,7 @@ class OJMicrolineThermostat(
             msg = "The thermostat does not support this preset."
             raise ServiceValidationError(msg)
         try:
-            await self._async_command_with_readback(HA_TO_VENDOR_STATE[preset_mode])
+            await self._async_command(HA_TO_VENDOR_STATE[preset_mode])
         except OJMicrolineError as error:
             msg = "The thermostat preset command failed."
             raise HomeAssistantError(msg) from error
@@ -337,7 +336,7 @@ class OJMicrolineThermostat(
             raise ServiceValidationError(msg)
 
         try:
-            await self._async_command_with_readback(
+            await self._async_command(
                 None,
                 temperature=round(temperature * 100),
                 duration=self.options.get(CONF_COMFORT_MODE_DURATION),
@@ -346,29 +345,23 @@ class OJMicrolineThermostat(
             msg = "The thermostat temperature command failed."
             raise HomeAssistantError(msg) from error
 
-    async def _async_command_with_readback(
+    async def _async_command(
         self,
         regulation_mode: int | None,
         temperature: int | None = None,
         duration: int | None = None,
     ) -> None:
-        """Serialize a write and confirm fresh cloud state, without replaying POSTs."""
-        try:
-            async with asyncio.timeout(COMMAND_TIMEOUT):
-                await self._async_write_and_verify(
-                    regulation_mode, temperature, duration
-                )
-        except TimeoutError as error:
-            msg = "The thermostat command timed out; its state was not confirmed."
-            raise HomeAssistantError(msg) from error
+        """Use verified WG4 commands, while retaining WD5 push/refresh behavior."""
+        if self.coordinator.wd5_api is None:
+            await self.coordinator.async_verified_command(
+                self.idx,
+                regulation_mode,
+                temperature=temperature,
+                duration=duration,
+                use_comfort_mode=bool(self.options.get(CONF_USE_COMFORT_MODE)),
+            )
+            return
 
-    async def _async_write_and_verify(
-        self,
-        regulation_mode: int | None,
-        temperature: int | None,
-        duration: int | None,
-    ) -> None:
-        """Complete the command inside the overall deadline, including lock wait."""
         async with self._command_lock:
             if not self.available:
                 msg = "The thermostat is unavailable."
@@ -388,33 +381,7 @@ class OJMicrolineThermostat(
                 temperature=temperature,
                 duration=duration,
             )
-            msg = (
-                "The command was accepted, but matching cloud state was not confirmed."
-            )
-            try:
-                async with asyncio.timeout(15):
-                    for _ in range(6):
-                        await asyncio.sleep(2)
-                        thermostats = await self.coordinator.api.get_thermostats()
-                        fresh = {
-                            thermostat.serial_number: thermostat
-                            for thermostat in thermostats
-                        }
-                        self.coordinator.async_set_updated_data(fresh)
-                        thermostat = fresh.get(self.idx)
-                        if thermostat is None or not thermostat.online:
-                            raise HomeAssistantError(msg)
-                        if thermostat.regulation_mode != regulation_mode:
-                            continue
-                        if (
-                            temperature is not None
-                            and thermostat.get_target_temperature() != temperature
-                        ):
-                            continue
-                        return
-            except (TimeoutError, OJMicrolineError) as error:
-                raise HomeAssistantError(msg) from error
-            raise HomeAssistantError(msg)
+            await self.coordinator.async_request_delayed_refresh()
 
     async def async_set_vacation(self, start_date: date, end_date: date) -> None:
         """Schedule a vacation for this thermostat's group.
@@ -471,22 +438,6 @@ class OJMicrolineThermostat(
         except ScheduleError as error:
             raise ServiceValidationError(str(error)) from error
         await self.coordinator.async_change_schedule(thermostat, schedule)
-
-    async def _async_delayed_request_refresh(self) -> None:
-        """Get delayed data from the coordinator.
-
-        Refreshing immediately after an API call can return stale data,
-        probably due to DB propagation on the API backend.
-
-        The *ideal* fix would be to switch away from polling; the API
-        does support some sort of HTTP-long-poll notification mechanism.
-
-        As a temporary band-aid, sleep for 2 seconds and then request a
-        refresh. Manual testing indicates this seems to work well enough;
-        1 second was verified to be too short.
-        """
-        await asyncio.sleep(2)
-        await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(
         self,

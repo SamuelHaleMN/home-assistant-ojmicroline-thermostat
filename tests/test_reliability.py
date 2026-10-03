@@ -24,7 +24,8 @@ SPEC = importlib.util.spec_from_file_location(
     Path(__file__).parents[1]
     / "custom_components/ojmicroline_thermostat/reliability.py",
 )
-assert SPEC is not None and SPEC.loader is not None
+assert SPEC is not None
+assert SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 ReliableWG4API = MODULE.ReliableWG4API
@@ -41,6 +42,7 @@ class Response:
         self.payload = payload
         self.delay = delay
         self.content_type = content_type
+        self.headers = {}
         self.released = False
 
     async def __aenter__(self):

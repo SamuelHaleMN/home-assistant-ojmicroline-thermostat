@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "home-assistant-ojmicroline-thermostat"
-version = "1.5.0"
+version = "1.5.1"
 description = "Control your OJ Microline Thermostat using home assistant."
 authors = ["Robbin Janssen <robbinjanssen@gmail.com>"]
 maintainers = ["Robbin Janssen <robbinjanssen@gmail.com>"]
@@ -25,7 +25,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.15"
-ojmicroline-thermostat = { git = "https://github.com/robbinjanssen/python-ojmicroline-thermostat.git", branch = "main" }
+ojmicroline-thermostat = "==3.6.0"
 voluptuous = "^0.16.0"
 
 [tool.poetry.group.dev.dependencies]
@@ -34,6 +34,8 @@ mypy = "1.19.1"
 pre-commit = "4.5.1"
 pre-commit-hooks = "6.0.0"
 pylint = "4.0.4"
+pytest = "9.1.1"
+pytest-asyncio = "1.4.0"
 ruff = "0.16.9"
 yamllint = "1.38.0"
 async-timeout = "5.0.1"
@@ -123,6 +125,11 @@ lint.ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "test_output.py" = ["ERA001", "T201"]
+# Focused tests deliberately use interface doubles, synthetic credentials,
+# assertions, and private members to exercise the pinned upstream protocol.
+# Keep correctness, import, fixture, and formatting checks enabled.
+"tests/*.py" = ["ANN", "ARG", "D", "EM101", "INP001", "S101", "S105", "S106", "SLF001", "TRY003"]
+"scripts/native_smoke.py" = ["S101", "S105", "T201"]
 
 [tool.ruff.lint.flake8-pytest-style]
 mark-parentheses = false

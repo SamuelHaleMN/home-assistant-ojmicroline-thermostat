@@ -4,10 +4,16 @@ GETs may renew a rejected session once. Writes are never automatically replayed:
 even a lost or unauthorized response must not produce an extra thermostat change.
 """
 
+# Exact primitive checks prevent bool from being accepted as an integer.
+# pylint: disable=unidiomatic-typecheck
+
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from time import monotonic
 from typing import Any
 
 from aiohttp import ClientError, ClientSession, hdrs
@@ -23,6 +29,29 @@ from ojmicroline_thermostat.exceptions import (
 )
 
 REQUEST_TIMEOUT = 30.0
+DEFAULT_RATE_LIMIT_DELAY = 300.0
+MIN_RATE_LIMIT_DELAY = 30.0
+MAX_RATE_LIMIT_DELAY = 86400.0
+
+
+def _retry_after_delay(
+    value: str | None, *, fallback: float | None = DEFAULT_RATE_LIMIT_DELAY
+) -> float | None:
+    """Bound Retry-After; use the caller's fallback only when it is unusable."""
+    if value is None:
+        return fallback
+    try:
+        return float(max(MIN_RATE_LIMIT_DELAY, min(int(value), MAX_RATE_LIMIT_DELAY)))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        delay = (retry_at - datetime.now(UTC)).total_seconds()
+    except (OverflowError, TypeError, ValueError):
+        return fallback
+    return max(MIN_RATE_LIMIT_DELAY, min(delay, MAX_RATE_LIMIT_DELAY))
 
 
 class _RejectedSessionError(Exception):
@@ -42,8 +71,14 @@ class ReliableWG4API(WG4API):
         """Initialize independent session state for this account."""
         super().__init__(username, password, host, application)
         self._auth_lock = asyncio.Lock()
-        self._session_id = None
+        self._session_id: str | None = None
         self._session_calls_left = 0
+        self._authentication_count = 0
+
+    @property
+    def authentication_count(self) -> int:
+        """Return successful logins since this account instance was created."""
+        return self._authentication_count
 
     async def _authenticate(self) -> None:
         """Authenticate while the caller holds the account lock."""
@@ -69,6 +104,7 @@ class ReliableWG4API(WG4API):
             raise OJMicrolineError(msg)
         self._session_id = session
         self._session_calls_left = self._session_calls
+        self._authentication_count += 1
 
     async def login(self) -> None:
         """Reuse valid sessions, with bounded lock waiting and login."""
@@ -99,6 +135,53 @@ class ReliableWG4API(WG4API):
             if self._session_id == rejected:
                 self._session_id = None
                 self._session_calls_left = 0
+
+    def parse_thermostats_response(self, data: Any) -> list[Thermostat]:
+        """Reject broken inventories before updating HA or verifying a command."""
+        msg = "WG4 returned malformed thermostat data"
+        if not isinstance(data, dict) or not isinstance(data.get("Groups"), list):
+            raise OJMicrolineError(msg)
+        for group in data["Groups"]:
+            if not isinstance(group, dict) or not isinstance(
+                group.get("Thermostats"), list
+            ):
+                raise OJMicrolineError(msg)
+            for item in group["Thermostats"]:
+                if not isinstance(item, dict):
+                    raise OJMicrolineError(msg)
+                # Upstream ignores empty placeholders returned by the cloud.
+                if not item:
+                    continue
+                serial = item.get("SerialNumber")
+                if not isinstance(serial, str) or not serial.strip():
+                    raise OJMicrolineError(msg)
+                if any(
+                    type(item.get(key)) is not bool
+                    for key in ("Online", "Heating", "VacationEnabled")
+                ):
+                    raise OJMicrolineError(msg)
+                if any(
+                    type(item.get(key)) is not int
+                    for key in (
+                        "RegulationMode",
+                        "MinTemp",
+                        "MaxTemp",
+                        "ManualTemperature",
+                        "ComfortTemperature",
+                        "SetPointTemp",
+                    )
+                ):
+                    raise OJMicrolineError(msg)
+                if (
+                    item.get("Temperature") is not None
+                    and type(item["Temperature"]) is not int
+                ):
+                    raise OJMicrolineError(msg)
+        try:
+            return super().parse_thermostats_response(data)
+        except (KeyError, TypeError, ValueError):
+            # Date parsers can include the raw server value in their exceptions.
+            raise OJMicrolineError(msg) from None
 
     def update_regulation_mode_body(
         self,
@@ -133,7 +216,13 @@ class ReliableOJMicroline(OJMicroline):
         self._wg4_api = api
         self._wg4_session = session
         self._command_locks: dict[str, asyncio.Lock] = {}
+        self._rate_limit_until = 0.0
         super().__init__(api=api, session=session)
+
+    @property
+    def rate_limit_remaining(self) -> float:
+        """Return remaining account cooldown seconds without cloud identifiers."""
+        return max(0.0, self._rate_limit_until - monotonic())
 
     async def get_thermostats(self) -> list[Thermostat]:
         """Include authentication in the public read's operation budget."""
@@ -162,7 +251,8 @@ class ReliableOJMicroline(OJMicroline):
             msg = "WG4 command timed out"
             raise OJMicrolineTimeoutError(msg) from None
 
-    async def _request(  # noqa: PLR0913 - matches the upstream transport interface
+    # Request arguments follow the pinned upstream transport interface.
+    async def _request(  # noqa: PLR0913 # pylint: disable=too-many-arguments
         self,
         uri: str,
         *,
@@ -214,7 +304,7 @@ class ReliableOJMicroline(OJMicroline):
             msg = "WG4 request failed"
             raise OJMicrolineConnectionError(msg) from None
 
-    async def _request_once(
+    async def _request_once(  # pylint: disable=too-many-arguments
         self,
         uri: str,
         method: str,
@@ -223,6 +313,9 @@ class ReliableOJMicroline(OJMicroline):
         headers: dict[str, str] | None,
     ) -> Any:
         """Consume and release the complete response inside the deadline."""
+        if self.rate_limit_remaining > 0:
+            msg = "WG4 requests are paused after cloud rate limiting"
+            raise OJMicrolineConnectionError(msg)
         url = URL.build(scheme="https", host=self._wg4_api.host, path="/").join(
             URL(uri)
         )
@@ -236,6 +329,17 @@ class ReliableOJMicroline(OJMicroline):
         ) as response:
             if response.status == 401:
                 raise _RejectedSessionError
+            if response.status in (429, 503):
+                delay = _retry_after_delay(
+                    response.headers.get("Retry-After"),
+                    fallback=DEFAULT_RATE_LIMIT_DELAY
+                    if response.status == 429
+                    else None,
+                )
+                if delay is not None:
+                    self._rate_limit_until = max(
+                        self._rate_limit_until, monotonic() + delay
+                    )
             if response.status >= 400:
                 msg = f"WG4 request returned HTTP {response.status}"
                 raise OJMicrolineConnectionError(msg)

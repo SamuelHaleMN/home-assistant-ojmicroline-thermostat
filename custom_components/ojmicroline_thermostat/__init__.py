@@ -100,9 +100,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
     if config_entry.version == 1:
         # Version 1 only supported WD5; version 2 requires CONF_MODEL
-        config_entry.version = CONFIG_FLOW_VERSION
         hass.config_entries.async_update_entry(
             config_entry,
+            version=CONFIG_FLOW_VERSION,
             data={
                 CONF_MODEL: MODEL_WD5_SERIES,
                 **config_entry.data,

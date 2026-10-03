@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlowWithReload
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
@@ -81,7 +81,7 @@ class OJMicrolineFlowHandler(ConfigFlow, domain=DOMAIN):  # type: ignore[call-ar
     @callback
     def async_get_options_flow(
         config_entry: ConfigEntry,  # noqa: ARG004 # pylint: disable=unused-argument
-    ) -> OptionsFlow:
+    ) -> OptionsFlowWithReload:
         """Get the options flow for this handler.
 
         Args:
@@ -274,7 +274,7 @@ class OJMicrolineFlowHandler(ConfigFlow, domain=DOMAIN):  # type: ignore[call-ar
                 await api.close()
         return False
 
-    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:  # noqa: ARG002
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:  # noqa: ARG002 # pylint: disable=unused-argument
         """Start password recovery for the existing account."""
         return await self.async_step_reauth_confirm()
 
@@ -297,8 +297,8 @@ class OJMicrolineFlowHandler(ConfigFlow, domain=DOMAIN):  # type: ignore[call-ar
         )
 
 
-class OJMicrolineOptionsFlowHandler(OptionsFlow):
-    """Handle options."""
+class OJMicrolineOptionsFlowHandler(OptionsFlowWithReload):
+    """Reload entities when options change so they receive the new mapping."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
