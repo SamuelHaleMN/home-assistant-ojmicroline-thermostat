@@ -237,7 +237,8 @@ the deliberate interface doubles in tests.
 In a Linux environment with the intended HA release and the pinned client
 installed, run `python -m scripts.native_smoke` from the checkout. This uses
 real HA classes and the real client factory to check imports, Fahrenheit
-capabilities/state, missing-device behavior and config-flow construction with
+capabilities/state, missing-device behavior, config-flow construction, native
+service responses and real Lovelace resource registration/idempotence with
 synthetic data and no cloud calls. It does not start an HA server or install
 the integration. Qualify actual entry setup/reload, cloud authentication and a
 bounded control canary separately before promoting a release.
