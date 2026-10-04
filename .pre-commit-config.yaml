@@ -92,6 +92,7 @@ repos:
           poetry run mypy --config-file=pyproject.toml --follow-imports=silent
           --explicit-package-bases --namespace-packages
           custom_components/ojmicroline_thermostat/reliability.py
+          custom_components/ojmicroline_thermostat/wg4_schedule.py
         pass_filenames: false
       - id: no-commit-to-branch
         name: Don't commit to main branch

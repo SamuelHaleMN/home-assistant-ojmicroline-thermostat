@@ -10,6 +10,7 @@ even a lost or unauthorized response must not produce an extra thermostat change
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -32,6 +33,18 @@ REQUEST_TIMEOUT = 30.0
 DEFAULT_RATE_LIMIT_DELAY = 300.0
 MIN_RATE_LIMIT_DELAY = 30.0
 MAX_RATE_LIMIT_DELAY = 86400.0
+SCHEDULE_LIMITS_CACHE_SECONDS = 86400.0
+WG4_CONTROL_FIELDS = (
+    "RegulationMode",
+    "LastPrimaryModeIsAuto",
+    "ManualTemperature",
+    "ComfortTemperature",
+    "ComfortEndTime",
+    "VacationEnabled",
+    "VacationTemperature",
+    "VacationBeginDay",
+    "VacationEndDay",
+)
 
 
 def _retry_after_delay(
@@ -74,6 +87,17 @@ class ReliableWG4API(WG4API):
         self._session_id: str | None = None
         self._session_calls_left = 0
         self._authentication_count = 0
+        self._schedule_snapshots: dict[str, dict[str, Any]] = {}
+
+    def get_wg4_schedule_snapshot(self, serial: str) -> dict[str, Any] | None:
+        """Return isolated stored-program data from the last valid inventory.
+
+        Schedule validation belongs to the WG4 schedule model. A malformed or
+        absent program must not make otherwise usable climate data unavailable.
+        The cache contains no credentials, session, account or location fields.
+        """
+        snapshot = self._schedule_snapshots.get(serial)
+        return copy.deepcopy(snapshot) if snapshot is not None else None
 
     @property
     def authentication_count(self) -> int:
@@ -178,10 +202,32 @@ class ReliableWG4API(WG4API):
                 ):
                     raise OJMicrolineError(msg)
         try:
-            return super().parse_thermostats_response(data)
+            thermostats = super().parse_thermostats_response(data)
         except (KeyError, TypeError, ValueError):
             # Date parsers can include the raw server value in their exceptions.
             raise OJMicrolineError(msg) from None
+        # Publish the whole cache only after climate validation and parsing pass.
+        # Missing devices disappear from this generation rather than retaining a
+        # stale schedule that could later be used as the basis of a write.
+        self._schedule_snapshots = {
+            item["SerialNumber"]: copy.deepcopy(
+                {
+                    key: item[key]
+                    for key in (
+                        "Schedules",
+                        "TZOffset",
+                        "MinTemp",
+                        "MaxTemp",
+                        *WG4_CONTROL_FIELDS,
+                    )
+                    if key in item
+                }
+            )
+            for group in data["Groups"]
+            for item in group["Thermostats"]
+            if item and "Schedules" in item
+        }
+        return thermostats
 
     def update_regulation_mode_body(
         self,
@@ -217,12 +263,68 @@ class ReliableOJMicroline(OJMicroline):
         self._wg4_session = session
         self._command_locks: dict[str, asyncio.Lock] = {}
         self._rate_limit_until = 0.0
+        self._schedule_limits: dict[str, dict[str, Any]] = {}
+        self._schedule_limits_loaded_at: float | None = None
         super().__init__(api=api, session=session)
 
     @property
     def rate_limit_remaining(self) -> float:
         """Return remaining account cooldown seconds without cloud identifiers."""
         return max(0.0, self._rate_limit_until - monotonic())
+
+    def cached_wg4_schedule_limits(self, serial: str) -> dict[str, Any] | None:
+        """Return per-device editing limits without adding background requests."""
+        if (
+            self._schedule_limits_loaded_at is None
+            or monotonic() - self._schedule_limits_loaded_at
+            >= SCHEDULE_LIMITS_CACHE_SECONDS
+        ):
+            return None
+        limits = self._schedule_limits.get(serial)
+        return copy.deepcopy(limits) if limits is not None else None
+
+    async def get_wg4_schedule_limits(self, serial: str) -> dict[str, Any]:
+        """Fetch account-wide /defaults at most daily, only for explicit editing."""
+        cached = self.cached_wg4_schedule_limits(serial)
+        if cached is not None:
+            return cached
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT):
+                await self.login()
+                data = await self._wg4_api.request(
+                    "api/defaults",
+                    # The pinned API exposes its current session only privately.
+                    # pylint: disable-next=protected-access
+                    params={"sessionid": self._wg4_api._session_id},  # noqa: SLF001
+                )
+                if not isinstance(data, dict) or not isinstance(
+                    data.get("Thermostats"), list
+                ):
+                    msg = "WG4 returned malformed schedule limits"
+                    raise OJMicrolineError(msg)
+                limits: dict[str, dict[str, Any]] = {}
+                for item in data["Thermostats"]:
+                    if (
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("SerialNumber"), str)
+                        or not item["SerialNumber"].strip()
+                        or item["SerialNumber"] in limits
+                    ):
+                        msg = "WG4 returned malformed schedule limits"
+                        raise OJMicrolineError(msg)
+                    limits[item["SerialNumber"]] = {
+                        key: copy.deepcopy(item.get(key))
+                        for key in ("MinTimeLimits", "MaxTimeLimits")
+                    }
+                if serial not in limits:
+                    msg = "WG4 schedule limits are unavailable for this thermostat"
+                    raise OJMicrolineError(msg)
+                self._schedule_limits = limits
+                self._schedule_limits_loaded_at = monotonic()
+                return copy.deepcopy(limits[serial])
+        except TimeoutError:
+            msg = "WG4 schedule limits request timed out"
+            raise OJMicrolineTimeoutError(msg) from None
 
     async def get_thermostats(self) -> list[Thermostat]:
         """Include authentication in the public read's operation budget."""
@@ -249,6 +351,33 @@ class ReliableOJMicroline(OJMicroline):
                 )
         except TimeoutError:
             msg = "WG4 command timed out"
+            raise OJMicrolineTimeoutError(msg) from None
+
+    async def set_wg4_schedule(
+        self, resource: Thermostat, wire: list[dict[str, Any]]
+    ) -> bool:
+        """Save one native WG4 program without activation or write replay.
+
+        The vendor WG4 website's SaveSchedule sends only the full Schedules
+        array to the same per-thermostat endpoint used for mode changes.
+        """
+        lock = self._command_locks.setdefault(resource.serial_number, asyncio.Lock())
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT), lock:
+                await self.login()
+                data = await self._wg4_api.request(
+                    self._wg4_api.update_regulation_mode_path,
+                    method=hdrs.METH_POST,
+                    params={
+                        # pylint: disable-next=protected-access
+                        "sessionid": self._wg4_api._session_id,  # noqa: SLF001
+                        "serialnumber": resource.serial_number,
+                    },
+                    body={"Schedules": copy.deepcopy(wire)},
+                )
+                return self._wg4_api.parse_update_regulation_mode_response(data)
+        except TimeoutError:
+            msg = "WG4 schedule command timed out"
             raise OJMicrolineTimeoutError(msg) from None
 
     # Request arguments follow the pinned upstream transport interface.

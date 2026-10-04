@@ -15,12 +15,15 @@ import sys
 import tempfile
 from datetime import timedelta
 from importlib.metadata import version
+from typing import Any
+from unittest.mock import AsyncMock
 
 from homeassistant.components.network import async_get_adapters
 from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import frame
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.entity_platform import DATA_DOMAIN_PLATFORM_ENTITIES
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 from ojmicroline_thermostat import WD5API, Thermostat
@@ -31,7 +34,17 @@ from custom_components.ojmicroline_thermostat.api import (
 )
 from custom_components.ojmicroline_thermostat.climate import OJMicrolineThermostat
 from custom_components.ojmicroline_thermostat.config_flow import OJMicrolineFlowHandler
-from custom_components.ojmicroline_thermostat.reliability import ReliableOJMicroline
+from custom_components.ojmicroline_thermostat.coordinator import (
+    OJMicrolineDataUpdateCoordinator,
+)
+from custom_components.ojmicroline_thermostat.reliability import (
+    ReliableOJMicroline,
+    ReliableWG4API,
+)
+from custom_components.ojmicroline_thermostat.services import (
+    async_register_native_schedule_service,
+)
+from custom_components.ojmicroline_thermostat.wg4_schedule import WG4Schedule
 
 MODULE_NAMES = (
     "api",
@@ -45,6 +58,8 @@ MODULE_NAMES = (
     "date",
     "switch",
     "diagnostics",
+    "wg4_schedule",
+    "services",
 )
 
 
@@ -52,6 +67,88 @@ class SmokeCoordinator(DataUpdateCoordinator[dict[str, Thermostat]]):
     """Use native HA coordinator state without running an external API poll."""
 
     wd5_api: WD5API | None = None
+
+
+async def qualify_native_action(
+    hass: HomeAssistant,
+    model: Thermostat,
+    api: ReliableWG4API,
+    client: ReliableOJMicroline,
+) -> None:
+    """Exercise the real HA entity service and cached coordinator preview."""
+    # Synthetic cache injection is intentional; the real constructor starts
+    # account discovery, which this zero-network native qualification excludes.
+    # pylint: disable=protected-access
+    week = [
+        {
+            "WeekDayGrpNo": day,
+            "Events": [
+                {
+                    "ScheduleType": slot,
+                    "Clock": f"{6 + slot * 2:02d}:00:00",
+                    "TempFloor": 2555,
+                    "Active": slot == 0,
+                }
+                for slot in range(6)
+            ],
+        }
+        for day in range(1, 8)
+    ]
+    # This disposable coordinator uses native HA publication and dispatch but
+    # never starts a poll. Any accidental transport request fails qualification.
+    coordinator = object.__new__(OJMicrolineDataUpdateCoordinator)
+    # pylint: disable-next=unnecessary-dunder-call
+    DataUpdateCoordinator.__init__(
+        coordinator,
+        hass,
+        logging.getLogger("oj-native-action"),
+        name="oj-native-action",
+        config_entry=None,
+    )
+    coordinator._model_api = api  # noqa: SLF001
+    coordinator._account_lock = asyncio.Lock()  # noqa: SLF001
+    coordinator.wd5_api = None
+    coordinator.api = client
+    api._schedule_snapshots[model.serial_number] = {  # noqa: SLF001
+        "Schedules": week,
+        "MinTemp": 500,
+        "MaxTemp": 4000,
+        "TZOffset": "-04:00",
+    }
+    no_network = AsyncMock(side_effect=AssertionError("Unexpected cloud request"))
+    api.request = no_network
+    coordinator.async_set_updated_data({model.serial_number: model})
+    entity = OJMicrolineThermostat(coordinator, model.serial_number, {})
+    entity.hass = hass
+    entity.entity_id = "climate.native_demo"
+    # Entity state publication was qualified above; isolate that unrelated hook
+    # while testing the real service helper's selection/validation/response path.
+    entity.async_update_ha_state = AsyncMock()
+    hass.data[DATA_DOMAIN_PLATFORM_ENTITIES] = {
+        ("climate", "ojmicroline_thermostat"): {entity.entity_id: entity}
+    }
+    async_register_native_schedule_service(hass)
+    service_data: dict[str, Any] = {
+        "changes": [{"day": "monday", "slot": 0, "temperature": 80}],
+        "expected_hash": WG4Schedule(week).fingerprint(),
+        "temperature_unit": "F",
+    }
+    response = await hass.services.async_call(
+        "ojmicroline_thermostat",
+        "set_native_schedule",
+        service_data,
+        blocking=True,
+        return_response=True,
+        target={"entity_id": entity.entity_id},
+    )
+    assert response is not None
+    preview = response[entity.entity_id]
+    assert preview["dry_run"] is True
+    assert preview["changed"] is True
+    assert preview["temperature_unit"] == "C"
+    assert preview["days"]["monday"][0]["temperature"] == 26.66
+    assert preview["days"]["tuesday"][0]["temperature"] == 25.55
+    no_network.assert_not_awaited()
 
 
 async def qualify(config_dir: str) -> dict[str, str | int]:
@@ -131,6 +228,8 @@ async def qualify(config_dir: str) -> dict[str, str | int]:
         flow.hass = hass
         result = await flow.async_step_user()
         assert result["step_id"] == "user"
+        assert isinstance(api, ReliableWG4API)
+        await qualify_native_action(hass, model, api, client)
         await client.close()
         assert not session.closed
         return {
@@ -144,6 +243,8 @@ async def qualify(config_dir: str) -> dict[str, str | int]:
             "fahrenheit_state": "passed",
             "missing_device_capabilities": "passed",
             "native_user_flow": "passed",
+            "native_schedule_action_response": "passed",
+            "native_schedule_fahrenheit_patch": "passed",
             "cloud_requests": 0,
         }
     finally:

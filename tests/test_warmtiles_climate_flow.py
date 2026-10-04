@@ -110,7 +110,10 @@ def modules(monkeypatch):
         UnitOfTemperature=SimpleNamespace(CELSIUS="°C"),
     )
     module(
-        "homeassistant.core", callback=lambda function: function, HomeAssistant=object
+        "homeassistant.core",
+        callback=lambda function: function,
+        HomeAssistant=object,
+        SupportsResponse=SimpleNamespace(ONLY="only"),
     )
     module("homeassistant.data_entry_flow", FlowResult=dict)
     module(
@@ -150,6 +153,9 @@ def modules(monkeypatch):
         ensure_list=list,
     )
     module("homeassistant.helpers.entity_platform")
+    module(
+        "homeassistant.helpers.service", async_register_platform_entity_service=Mock()
+    )
     package = module("custom_components")
     package.__path__ = [str(SOURCE / "custom_components")]
     package = module("custom_components.ojmicroline_thermostat")
@@ -177,7 +183,7 @@ def modules(monkeypatch):
         ScheduleError=ValueError,
         set_days=Mock(),
     )
-    for name in ("climate", "config_flow", "const", "coordinator"):
+    for name in ("climate", "config_flow", "const", "coordinator", "services"):
         monkeypatch.delitem(
             sys.modules,
             f"custom_components.ojmicroline_thermostat.{name}",

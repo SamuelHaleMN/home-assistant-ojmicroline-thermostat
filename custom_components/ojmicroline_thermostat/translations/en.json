@@ -86,6 +86,9 @@
         "sensor": {
             "schedule": {
                 "name": "Schedule"
+            },
+            "native_schedule": {
+                "name": "Native schedule"
             }
         },
         "date": {
@@ -145,7 +148,29 @@
                 },
                 "events": {
                     "name": "Events",
-                    "description": "The day's events in order, each with a time (HH:MM) and a temperature (5-40 \u00b0C)."
+                    "description": "The day's events in order, each with a time (HH:MM) and a temperature (5-40 °C)."
+                }
+            }
+        },
+        "set_native_schedule": {
+            "name": "Edit native weekly schedule",
+            "description": "Preview or save WG4 weekly event patches on one thermostat. Times use the thermostat local clock. Saving preserves the current preset. A response is required; preview defaults to true.",
+            "fields": {
+                "changes": {
+                    "name": "Event changes",
+                    "description": "Patches with day (monday through sunday), slot (0 through 5), and optional time (HH:MM), temperature or active. Unspecified fields and events are preserved."
+                },
+                "expected_hash": {
+                    "name": "Original schedule hash",
+                    "description": "The full schedule_hash from the native schedule sensor when editing began. A newer app/device edit causes the save to be rejected."
+                },
+                "temperature_unit": {
+                    "name": "Temperature unit",
+                    "description": "C for Celsius or F for Fahrenheit. Nested temperatures are interpreted explicitly in this unit."
+                },
+                "dry_run": {
+                    "name": "Preview only",
+                    "description": "True validates cached data without cloud requests. False reads fresh data, saves a backup, uploads once and checks cloud readback."
                 }
             }
         }

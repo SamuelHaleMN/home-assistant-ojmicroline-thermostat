@@ -95,7 +95,12 @@ def coordinator(*, model="UWG4", online=True):
         vacation_mode=False,
         schedule=None,
     )
-    return SimpleNamespace(data={"synthetic-id": thermostat}, last_update_success=True)
+    return SimpleNamespace(
+        data={"synthetic-id": thermostat},
+        last_update_success=True,
+        wd5_api=object() if model == "OWD5" else None,
+        wg4_schedule_snapshot=lambda _: None,
+    )
 
 
 @pytest.mark.parametrize("fault", ["missing", "poll_failure", "offline"])
@@ -171,7 +176,11 @@ async def test_energy_created_only_when_api_provides_it(
         hass, SimpleNamespace(entry_id="synthetic-entry"), added.extend
     )
     assert (
-        any(entity.entity_description.key == "energy_usage" for entity in added)
+        any(
+            getattr(getattr(entity, "entity_description", None), "key", None)
+            == "energy_usage"
+            for entity in added
+        )
         is expected_energy
     )
 

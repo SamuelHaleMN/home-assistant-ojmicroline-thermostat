@@ -26,13 +26,16 @@ After installation you can add the thermostat through the integration page. Curr
 
 This fork is based on upstream 1.5.0 and keeps its pinned `ojmicroline-thermostat==3.6.0` dependency. Release `1.5.1` adds a small WG4 reliability adapter while WD5 continues to use the upstream client.
 
+Release `1.6.0` adds the WG4 native weekly program sensor, patch action and
+dashboard editor. Existing climate entity identities and presets are preserved.
+
 For ESW WiFi Warm Tiles ColorTouch, select **WG4 series**, host **warmtiles.mythermostat.info** (without `https://`), and **Application 13**. The default temperature policy is manual. WG4 uses conservative five-minute account polling in this release; it does not depend on the draft WG4 push implementation.
 
 If migrating this owner's legacy `schluter` entry, first back up HA and disable that entry. Select **Migrate existing Warm Tiles** and choose the saved entry. Credentials are read inside HA and validated against the Warm Tiles cloud. Installation and migration issue no thermostat commands. Rename legacy climate entity IDs to recorded backup names before assigning the desired IDs to the new entities; preserve device/area and external references separately.
 
 The adapter renews expired read sessions once, rejects invalid/empty login responses, serializes authentication and device commands, and bounds complete HTTP/JSON operations. Writes are never replayed automatically after an uncertain response. Rejected commands and failed cloud-readback verification reach the caller. Cloud readback does not prove physical device acknowledgement. Offline/missing devices and failed polling are unavailable, and unsupported WG4 energy is not exposed as a fabricated zero total.
 
-True WG4 remote OFF, schedule editing and vacation control are not established here. Thermostat hardware, local protection settings and stored schedules remain under the device's control. Do not translate OFF into manual heating or a low setpoint.
+True WG4 remote OFF and vacation control are not established here. WG4 native weekly editing uses the separate action/card described below. Thermostat hardware and local protection settings remain under the device's control. Do not translate OFF into manual heating or a low setpoint.
 
 Before HA or integration upgrades, qualify native setup, authentication, climate units/modes, missing-device handling and a bounded canary; retain the prior versioned artifact. Retire local patches only after an upstream release passes the same checks. This release is owned by SamuelHaleMN; see upstream for general OJ platform development.
 
@@ -78,6 +81,77 @@ WD5-series thermostats receive live updates through the same notification servic
 For every WD5-series thermostat the integration imports the energy usage history into a long-term statistic named "<thermostat> energy" (`ojmicroline_thermostat:energy_<serial>`): the last 12 months per month, the last 5 weeks per day and the last week per hour, kept up to date per hour from then on. Add it under **Settings â†’ Dashboards â†’ Energy â†’ Individual devices** to see the usage per day, week, month and year, like the apps' statistics screen.
 
 The "Energy Usage" sensor shows today's usage (from local midnight). Use either the statistic or the sensor in the energy dashboard, not both, or the usage is counted twice.
+
+## Native weekly programs (WG4 series)
+
+WG4 devices get a `sensor.<name>_native_schedule` entity with all seven weekdays,
+six stable event slots per day, and a `schedule_hash`. Selecting the climate
+`schedule` preset activates the thermostat's stored program. Editing that
+program preserves the active preset; a manual thermostat stays manual.
+
+Add **OJ Microline native schedule** to a dashboard, or use:
+
+```yaml
+type: custom:ojmicroline-native-schedule-card
+entity: sensor.kitchen_2_native_schedule
+climate_entity: climate.kitchen_2
+title: Kitchen 2
+```
+
+The editor shows six numbered events for each day, including inactive slots.
+The first event must stay active. It uses the thermostat's local wall-clock
+times and explicitly labelled Celsius or Fahrenheit. It does not use the
+browser clock to infer the current event or change device clock/DST settings.
+Untouched native temperatures and dormant events are preserved exactly.
+
+**Preview** validates cached data without cloud requests. **Save** checks fresh
+state against the draft's original hash, validates actual device time limits,
+saves an original-program backup in HA storage, uploads the full week once,
+then verifies cloud readback. A newer program edited in the vendor app rejects
+an older draft. A no-change save skips the upload. There is a small unavoidable
+race if an external edit occurs between the final read and the write: the
+vendor API supplies no atomic revision check.
+
+The action requires one climate target and a response. Slot identifiers are
+0–5 (the card labels them Event 1–6). Patches include only changed fields;
+unspecified fields, slots, weekdays, and unknown vendor data remain intact.
+Nested temperatures do not receive HA climate unit conversion, so `C` or `F`
+is mandatory:
+
+```yaml
+action: ojmicroline_thermostat.set_native_schedule
+target:
+  entity_id: climate.kitchen_2
+data:
+  expected_hash: "<full schedule_hash from native schedule sensor>"
+  temperature_unit: F
+  dry_run: true
+  changes:
+    - day: monday
+      slot: 0
+      time: "06:00"
+      temperature: 80
+response_variable: preview
+```
+
+Review the returned preview, then send the same draft with `dry_run: false` to
+save. An unchanged patch is a no-op. Preview may report `limits_checked: false`
+before the first save has retrieved account defaults. Device limits are always
+checked before a changed upload. Draft editing and polling never fetch defaults;
+the first changed save reads them once and caches them.
+Cached device limits expire after 24 hours and refresh only on a changed save.
+
+A changed save normally uses one fresh account GET, one thermostat POST, and
+one delayed account GET, with at most three bounded readbacks under the same
+account lock/cooldown as climate commands. No uncertain write is automatically
+replayed. Stored backup history is bounded per device and never restored
+automatically over newer app changes. Cloud readback confirms API storage;
+physical upload acknowledgement and an observed schedule transition require
+separate verification. Ordinary weekly transitions run on the thermostat and
+do not require HA to send a cloud command at each event.
+
+The WG4 editor is separate from the following WD5 group editor and vacation
+actions. Do not use WD5's `set_schedule` format for a WG4 thermostat.
 
 ## Schedule and vacation (WD5 series)
 

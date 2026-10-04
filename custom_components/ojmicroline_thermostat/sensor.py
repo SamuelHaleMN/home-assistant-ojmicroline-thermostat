@@ -28,6 +28,7 @@ from .const import DOMAIN, MODE_FLOOR, MODE_ROOM, MODE_ROOM_FLOOR
 from .helpers import is_wd5, target_temperature, wd5_local_time
 from .models import OJMicrolineEntity
 from .schedule import current_setpoint, schedule_attributes
+from .wg4_schedule import WG4Schedule, WG4ScheduleError
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -262,6 +263,8 @@ async def async_setup_entry(
 
         if coordinator.data[idx].schedule is not None:
             entities.append(OJMicrolineScheduleSensor(coordinator, idx))
+        elif coordinator.wd5_api is None:
+            entities.append(OJMicrolineNativeScheduleSensor(coordinator, idx))
 
     async_add_entities(entities)
 
@@ -327,6 +330,61 @@ class OJMicrolineSensor(OJMicrolineEntity, SensorEntity):
         if self.formatter is not None and val is not None:
             return self.formatter(val)
         return val
+
+
+class OJMicrolineNativeScheduleSensor(OJMicrolineEntity, SensorEntity):
+    """Expose WG4's stored six-slot program without calculating local execution.
+
+    Clock fields belong to the thermostat's local wall clock. Its fixed offset
+    alone cannot establish seasonal timezone rules or physical acknowledgement.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "native_schedule"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, coordinator: OJMicrolineDataUpdateCoordinator, idx: str) -> None:
+        """Initialize the account-cache-backed schedule entity."""
+        super().__init__(coordinator, idx)
+        self._attr_unique_id = f"{idx}_native_schedule"
+
+    def _snapshot(self) -> tuple[WG4Schedule, dict[str, Any]] | None:
+        """Read only the existing inventory; unavailable schedules fail locally."""
+        thermostat = (self.coordinator.data or {}).get(self.idx)
+        if not super().available or thermostat is None or not thermostat.online:
+            return None
+        snapshot = self.coordinator.wg4_schedule_snapshot(self.idx)
+        if snapshot is None:
+            return None
+        try:
+            return WG4Schedule(snapshot.get("Schedules")), snapshot
+        except WG4ScheduleError:
+            return None
+
+    @property
+    def available(self) -> bool:
+        """Require an online thermostat and complete native schedule data."""
+        return self._snapshot() is not None
+
+    @property
+    def native_value(self) -> str | None:
+        """Report a stored cloud program, independently of the active preset."""
+        return "stored" if self.available else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose stable slot identities, exact revision and local-clock basis."""
+        if (current := self._snapshot()) is None:
+            return None
+        schedule, snapshot = current
+        return {
+            "schedule_hash": schedule.fingerprint(),
+            "days": schedule.attributes(),
+            "temperature_unit": "C",
+            "time_basis": "thermostat_local",
+            "timezone_offset": snapshot.get("TZOffset"),
+            "schedule_format": "WG4",
+        }
 
 
 class OJMicrolineScheduleSensor(OJMicrolineEntity, SensorEntity):

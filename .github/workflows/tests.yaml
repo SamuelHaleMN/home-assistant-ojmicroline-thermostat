@@ -35,6 +35,11 @@ jobs:
       - name: Run isolated WG4 regressions
         run: poetry run pytest -q tests
 
+      - name: Check native schedule card
+        run: |
+          node --check custom_components/ojmicroline_thermostat/frontend/ojmicroline-native-schedule-card.js
+          node --test tests/test_native_card.mjs
+
       - name: Check production and test lint
         run: poetry run ruff check custom_components tests scripts
 
@@ -45,4 +50,5 @@ jobs:
         run: |
           poetry run mypy --config-file=pyproject.toml --follow-imports=silent \
             --explicit-package-bases --namespace-packages \
-            custom_components/ojmicroline_thermostat/reliability.py
+            custom_components/ojmicroline_thermostat/reliability.py \
+            custom_components/ojmicroline_thermostat/wg4_schedule.py

@@ -1,4 +1,31 @@
 ---
+set_native_schedule:
+  target:
+    entity:
+      integration: ojmicroline_thermostat
+      domain: climate
+  fields:
+    changes:
+      required: true
+      example: '[{"day": "monday", "slot": 0, "time": "06:00", "temperature": 80}]'
+      selector:
+        object:
+    expected_hash:
+      required: true
+      selector:
+        text:
+    temperature_unit:
+      required: true
+      selector:
+        select:
+          options:
+            - C
+            - F
+    dry_run:
+      default: true
+      selector:
+        boolean:
+
 set_vacation:
   target:
     entity:

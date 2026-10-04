@@ -1,9 +1,11 @@
 """OJMicroline Thermostat platform configuration."""
 
 import asyncio
+import copy
 import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from math import ceil
 from time import monotonic
 from typing import Any, override
@@ -50,7 +52,8 @@ from .const import (
 from .energy import EnergyStatistics
 from .helpers import format_wd5, format_wd5_date, is_wd5
 from .push import WD5PushClient
-from .reliability import ReliableWG4API
+from .reliability import WG4_CONTROL_FIELDS, ReliableWG4API
+from .wg4_schedule import WG4Schedule
 
 _LOGGER = logging.getLogger(__name__)
 COMMAND_TIMEOUT = 90.0
@@ -188,6 +191,226 @@ class OJMicrolineDataUpdateCoordinator(DataUpdateCoordinator):
         except TimeoutError as error:
             msg = "The thermostat command timed out; its state was not confirmed."
             raise HomeAssistantError(msg) from error
+
+    def wg4_schedule_snapshot(self, idx: str) -> dict[str, Any] | None:
+        """Return an isolated, usable stored program without making a request."""
+        if not isinstance(self._model_api, ReliableWG4API):
+            return None
+        snapshot = self._model_api.get_wg4_schedule_snapshot(idx)
+        if snapshot is None:
+            return None
+        try:
+            WG4Schedule(snapshot.get("Schedules"))
+        except ValueError:
+            return None
+        return snapshot
+
+    async def async_wg4_schedule(  # pylint: disable=too-many-arguments,too-many-locals
+        self,
+        idx: str,
+        changes: list[dict[str, Any]],
+        expected_hash: str,
+        temperature_unit: str,
+        *,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Preview or save a native WG4 program, preserving regulation settings.
+
+        A preview uses the existing inventory only. Applying takes one fresh
+        account snapshot, requires the preview's hash, saves a recoverable
+        preimage, and sends one per-device POST. No command is replayed or
+        schedule mode activated. Cloud readback is bounded and serialized with
+        all account polling and other controls.
+        """
+        if not isinstance(self._model_api, ReliableWG4API):
+            msg = "Native schedule editing applies only to WG4 thermostats."
+            raise ServiceValidationError(msg)
+        try:
+            async with asyncio.timeout(COMMAND_TIMEOUT), self._account_lock:
+                if not dry_run:
+                    await self._async_wg4_schedule_inventory()
+                snapshot = self.wg4_schedule_snapshot(idx)
+                resource = (self.data or {}).get(idx)
+                if snapshot is None or resource is None:
+                    msg = "The thermostat has no usable native weekly program."
+                    raise ServiceValidationError(msg)
+                if not dry_run and not resource.online:
+                    msg = "The thermostat is unavailable."
+                    raise HomeAssistantError(msg)
+                baseline = WG4Schedule(snapshot["Schedules"])
+                if expected_hash != baseline.fingerprint():
+                    msg = (
+                        "The native program changed; "
+                        "obtain a new preview before saving."
+                    )
+                    raise ServiceValidationError(msg)
+                limits = self.api.cached_wg4_schedule_limits(idx)
+                updated = self._wg4_schedule_patch(
+                    baseline, changes, temperature_unit, snapshot, limits
+                )
+                result = self._wg4_schedule_result(
+                    baseline,
+                    updated,
+                    changes,
+                    snapshot,
+                    dry_run=dry_run,
+                    limits_checked=limits is not None,
+                )
+                if dry_run:
+                    return result
+                if not result["changed"]:
+                    # A fresh cloud inventory already matched; no write or
+                    # backup rotation is needed for an unchanged program.
+                    result["verified"] = True
+                    return result
+                if limits is None:
+                    # /defaults is an account-wide extra read. Reserve it for
+                    # changed saves; unchanged canaries need only inventory.
+                    limits = await self.api.get_wg4_schedule_limits(idx)
+                    updated = self._wg4_schedule_patch(
+                        baseline, changes, temperature_unit, snapshot, limits
+                    )
+                    result = self._wg4_schedule_result(
+                        baseline,
+                        updated,
+                        changes,
+                        snapshot,
+                        dry_run=False,
+                        limits_checked=True,
+                    )
+                backup_key = await self._async_wg4_schedule_backup(idx, snapshot)
+                await self.api.set_wg4_schedule(resource, updated.to_payload())
+                await self._async_verify_wg4_schedule(
+                    idx, updated.fingerprint(), snapshot
+                )
+                result["verified"] = True
+                result["backup_key"] = backup_key
+                self._verified_commands += 1
+                return result
+        except OJMicrolineError as error:
+            raise HomeAssistantError(str(error)) from error
+        except TimeoutError as error:
+            msg = (
+                "The native schedule operation timed out; its state was not confirmed."
+            )
+            raise HomeAssistantError(msg) from error
+
+    @staticmethod
+    def _wg4_schedule_patch(
+        baseline: WG4Schedule,
+        changes: list[dict[str, Any]],
+        temperature_unit: str,
+        snapshot: dict[str, Any],
+        limits: dict[str, Any] | None,
+    ) -> WG4Schedule:
+        """Translate model validation errors into a visible HA service error."""
+        try:
+            return baseline.with_changes(
+                changes,
+                unit=temperature_unit,
+                min_temp=snapshot["MinTemp"],
+                max_temp=snapshot["MaxTemp"],
+                limits=limits,
+            )
+        except ValueError as error:
+            raise ServiceValidationError(str(error)) from error
+
+    async def _async_wg4_schedule_inventory(self) -> None:
+        """Publish a fresh inventory while the caller holds the account lock."""
+        inventory = await self.api.get_thermostats()
+        self.async_set_updated_data({item.serial_number: item for item in inventory})
+
+    @staticmethod
+    def _wg4_schedule_result(  # noqa: PLR0913 # pylint: disable=too-many-arguments
+        baseline: WG4Schedule,
+        updated: WG4Schedule,
+        changes: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+        *,
+        dry_run: bool,
+        limits_checked: bool,
+    ) -> dict[str, Any]:
+        """Return the exact canonical preview in Celsius and device-local time."""
+        days = updated.attributes()
+        return {
+            "dry_run": dry_run,
+            "changed": updated.fingerprint() != baseline.fingerprint(),
+            "baseline_hash": baseline.fingerprint(),
+            "schedule_hash": updated.fingerprint(),
+            "changes": [
+                {"day": change["day"], **days[change["day"]][change["slot"]]}
+                for change in changes
+            ],
+            "days": days,
+            "temperature_unit": "C",
+            "time_basis": "thermostat_local",
+            "timezone_offset": snapshot.get("TZOffset"),
+            "verified": False,
+            "limits_checked": limits_checked,
+        }
+
+    async def _async_wg4_schedule_backup(
+        self, idx: str, snapshot: dict[str, Any]
+    ) -> str:
+        """Durably retain three exact preimages before any thermostat POST."""
+        # Keep the optional schedule-edit storage dependency off climate reads.
+        # pylint: disable-next=import-outside-toplevel
+        from homeassistant.helpers.storage import Store  # noqa: PLC0415
+
+        entry_id = self.config_entry.entry_id
+        identity = sha256(f"{entry_id}:{idx}".encode()).hexdigest()
+        key = f"{DOMAIN}.wg4_schedule_backup.{identity}"
+        store = Store(self.hass, 1, key)
+        try:
+            previous = await store.async_load()
+            if previous is not None and (
+                not isinstance(previous, dict)
+                or previous.get("serial_number") != idx
+                or not isinstance(previous.get("snapshots"), list)
+            ):
+                msg = "The native schedule backup is malformed; no write was sent."
+                raise HomeAssistantError(msg)
+            history = previous["snapshots"] if previous is not None else []
+            saved = {
+                "saved_at_utc": datetime.now(UTC).isoformat(),
+                "schedule_hash": WG4Schedule(snapshot["Schedules"]).fingerprint(),
+                "snapshot": copy.deepcopy(snapshot),
+            }
+            await store.async_save(
+                {"serial_number": idx, "snapshots": [*history[-2:], saved]}
+            )
+        except (OSError, TypeError, ValueError) as error:
+            msg = "The native schedule backup could not be saved; no write was sent."
+            raise HomeAssistantError(msg) from error
+        return key
+
+    async def _async_verify_wg4_schedule(
+        self, idx: str, expected_hash: str, baseline: dict[str, Any]
+    ) -> None:
+        """Confirm the stored program and unchanged controls by cloud readback."""
+        msg = (
+            "The schedule was accepted, but matching cloud program and unchanged "
+            "regulation settings were not confirmed."
+        )
+        try:
+            async with asyncio.timeout(VERIFY_TIMEOUT):
+                for delay in VERIFY_DELAYS:
+                    await asyncio.sleep(delay)
+                    await self._async_wg4_schedule_inventory()
+                    resource = (self.data or {}).get(idx)
+                    current = self.wg4_schedule_snapshot(idx)
+                    if resource is None or not resource.online or current is None:
+                        raise HomeAssistantError(msg)
+                    if any(
+                        current.get(key) != baseline.get(key)
+                        for key in WG4_CONTROL_FIELDS
+                    ):
+                        raise HomeAssistantError(msg)
+                    if WG4Schedule(current["Schedules"]).fingerprint() == expected_hash:
+                        return
+        except (TimeoutError, OJMicrolineError) as error:
+            raise HomeAssistantError(msg) from error
+        raise HomeAssistantError(msg)
 
     def diagnostic_status(self) -> dict[str, Any]:
         """Return operational counts without account/device identifiers or state."""

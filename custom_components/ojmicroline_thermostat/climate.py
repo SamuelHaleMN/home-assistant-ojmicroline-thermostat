@@ -439,6 +439,33 @@ class OJMicrolineThermostat(
             raise ServiceValidationError(str(error)) from error
         await self.coordinator.async_change_schedule(thermostat, schedule)
 
+    async def async_set_native_schedule(
+        self,
+        changes: list[dict[str, Any]],
+        expected_hash: str,
+        temperature_unit: str,
+        *,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Preview or apply patches to one WG4 thermostat's stored program.
+
+        Native schedule editing never activates schedule mode. Preview uses
+        cached account data; apply checks fresh state and verifies cloud storage.
+        """
+        if not self.available:
+            msg = "The thermostat is unavailable."
+            raise HomeAssistantError(msg)
+        if self.coordinator.wd5_api is not None:
+            msg = "Native schedule patches apply only to WG4-series thermostats."
+            raise ServiceValidationError(msg)
+        return await self.coordinator.async_wg4_schedule(
+            self.idx,
+            changes,
+            expected_hash,
+            temperature_unit,
+            dry_run=dry_run,
+        )
+
     async def async_set_hvac_mode(
         self,
         hvac_mode: HVACMode,

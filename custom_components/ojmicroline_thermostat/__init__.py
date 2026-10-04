@@ -13,11 +13,16 @@ from homeassistant.loader import async_get_integration
 
 from .const import CONF_MODEL, CONFIG_FLOW_VERSION, DOMAIN, MODEL_WD5_SERIES
 from .coordinator import OJMicrolineDataUpdateCoordinator
+from .services import async_register_native_schedule_service
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)  # pylint: disable=invalid-name
 
 CARD_URL = f"/{DOMAIN}/ojmicroline-schedule-card.js"
 CARD_PATH = Path(__file__).parent / "frontend" / "ojmicroline-schedule-card.js"
+NATIVE_CARD_URL = f"/{DOMAIN}/ojmicroline-native-schedule-card.js"
+NATIVE_CARD_PATH = (
+    Path(__file__).parent / "frontend" / "ojmicroline-native-schedule-card.js"
+)
 
 PLATFORMS = [
     Platform.CLIMATE,
@@ -41,12 +46,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # noqa:
         Return true after setting up.
 
     """
+    async_register_native_schedule_service(hass)
     integration = await async_get_integration(hass, DOMAIN)
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(CARD_URL, str(CARD_PATH), cache_headers=False)]
+        [
+            StaticPathConfig(CARD_URL, str(CARD_PATH), cache_headers=False),
+            StaticPathConfig(
+                NATIVE_CARD_URL, str(NATIVE_CARD_PATH), cache_headers=False
+            ),
+        ]
     )
     # The version busts browser caches after an update.
     add_extra_js_url(hass, f"{CARD_URL}?v={integration.version}")
+    add_extra_js_url(hass, f"{NATIVE_CARD_URL}?v={integration.version}")
     return True
 
 
