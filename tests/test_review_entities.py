@@ -104,6 +104,10 @@ async def test_version_one_migration_uses_ha_update_api(modules, monkeypatch):
     stub("homeassistant.components.http", StaticPathConfig=Mock())
     stub("homeassistant.helpers.typing", ConfigType=dict)
     stub("homeassistant.loader", async_get_integration=AsyncMock())
+    stub(
+        "custom_components.ojmicroline_thermostat.frontend_resources",
+        async_register_native_card_resource=AsyncMock(),
+    )
     sys.modules["homeassistant.const"].Platform = SimpleNamespace(
         CLIMATE="climate",
         SENSOR="sensor",

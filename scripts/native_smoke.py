@@ -15,9 +15,13 @@ import sys
 import tempfile
 from datetime import timedelta
 from importlib.metadata import version
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+from homeassistant.components.lovelace.const import LOVELACE_DATA
+from homeassistant.components.lovelace.dashboard import LovelaceStorage
+from homeassistant.components.lovelace.resources import ResourceStorageCollection
 from homeassistant.components.network import async_get_adapters
 from homeassistant.config_entries import ConfigEntries
 from homeassistant.core import HomeAssistant
@@ -36,6 +40,9 @@ from custom_components.ojmicroline_thermostat.climate import OJMicrolineThermost
 from custom_components.ojmicroline_thermostat.config_flow import OJMicrolineFlowHandler
 from custom_components.ojmicroline_thermostat.coordinator import (
     OJMicrolineDataUpdateCoordinator,
+)
+from custom_components.ojmicroline_thermostat.frontend_resources import (
+    async_register_native_card_resource,
 )
 from custom_components.ojmicroline_thermostat.reliability import (
     ReliableOJMicroline,
@@ -60,6 +67,7 @@ MODULE_NAMES = (
     "diagnostics",
     "wg4_schedule",
     "services",
+    "frontend_resources",
 )
 
 
@@ -151,6 +159,19 @@ async def qualify_native_action(
     no_network.assert_not_awaited()
 
 
+async def qualify_native_resources(hass: HomeAssistant) -> None:
+    """Use HA's real storage collection to check registration and idempotence."""
+    resources = ResourceStorageCollection(hass, LovelaceStorage(hass, None))
+    hass.data[LOVELACE_DATA] = SimpleNamespace(resources=resources)
+    native_url = "/ojmicroline_thermostat/ojmicroline-native-schedule-card.js?v=1.6.1"
+    assert await async_register_native_card_resource(hass, native_url)
+    resource = resources.async_items()[0]
+    assert resource["url"] == native_url
+    assert resource["type"] == "module"
+    assert await async_register_native_card_resource(hass, native_url)
+    assert resources.async_items() == [resource]
+
+
 async def qualify(config_dir: str) -> dict[str, str | int]:
     """Return successful native checks; exceptions fail the command."""
     assert version("ojmicroline-thermostat") == "3.6.0"
@@ -164,6 +185,7 @@ async def qualify(config_dir: str) -> dict[str, str | int]:
     # The real shared-session factory needs HA's loaded network adapters.
     # This prepares only this disposable instance; no cloud/API call is made.
     await async_get_adapters(hass)
+    await qualify_native_resources(hass)
     api = api_from_config_entry_data(
         {
             "model": "WG4 series",
@@ -245,6 +267,7 @@ async def qualify(config_dir: str) -> dict[str, str | int]:
             "native_user_flow": "passed",
             "native_schedule_action_response": "passed",
             "native_schedule_fahrenheit_patch": "passed",
+            "native_lovelace_resource_registration": "passed",
             "cloud_requests": 0,
         }
     finally:

@@ -1,5 +1,6 @@
 """OJMicroline Thermostat platform configuration."""
 
+import logging
 from pathlib import Path
 
 from homeassistant.components.frontend import add_extra_js_url
@@ -7,15 +8,18 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
 from .const import CONF_MODEL, CONFIG_FLOW_VERSION, DOMAIN, MODEL_WD5_SERIES
 from .coordinator import OJMicrolineDataUpdateCoordinator
+from .frontend_resources import async_register_native_card_resource
 from .services import async_register_native_schedule_service
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)  # pylint: disable=invalid-name
+_LOGGER = logging.getLogger(__name__)
 
 CARD_URL = f"/{DOMAIN}/ojmicroline-schedule-card.js"
 CARD_PATH = Path(__file__).parent / "frontend" / "ojmicroline-schedule-card.js"
@@ -56,9 +60,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # noqa:
             ),
         ]
     )
+    native_url = f"{NATIVE_CARD_URL}?v={integration.version}"
+    try:
+        await async_register_native_card_resource(hass, native_url)
+    except (HomeAssistantError, OSError, ValueError) as error:
+        # Dashboard discovery must not disable thermostat control. Global
+        # extra-module loading remains available when storage cannot be updated.
+        _LOGGER.warning(
+            "Native schedule dashboard resource registration failed (%s)",
+            type(error).__name__,
+        )
     # The version busts browser caches after an update.
     add_extra_js_url(hass, f"{CARD_URL}?v={integration.version}")
-    add_extra_js_url(hass, f"{NATIVE_CARD_URL}?v={integration.version}")
+    add_extra_js_url(hass, native_url)
     return True
 
 

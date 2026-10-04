@@ -29,6 +29,14 @@ This fork is based on upstream 1.5.0 and keeps its pinned `ojmicroline-thermosta
 Release `1.6.0` adds the WG4 native weekly program sensor, patch action and
 dashboard editor. Existing climate entity identities and presets are preserved.
 
+Release `1.6.1` registers the native card as a versioned Lovelace module as well
+as a global extra module. This gives cached mobile clients a dashboard-specific
+discovery path. The module's existing resource ID is preserved on upgrades;
+unrelated resources are unchanged. Narrow editors use two-column event rows.
+After updating, reload the app's frontend so its existing card definition is
+replaced. YAML-managed resource lists need the native card URL added explicitly
+as a `module`; the integration does not edit YAML configuration.
+
 For ESW WiFi Warm Tiles ColorTouch, select **WG4 series**, host **warmtiles.mythermostat.info** (without `https://`), and **Application 13**. The default temperature policy is manual. WG4 uses conservative five-minute account polling in this release; it does not depend on the draft WG4 push implementation.
 
 If migrating this owner's legacy `schluter` entry, first back up HA and disable that entry. Select **Migrate existing Warm Tiles** and choose the saved entry. Credentials are read inside HA and validated against the Warm Tiles cloud. Installation and migration issue no thermostat commands. Rename legacy climate entity IDs to recorded backup names before assigning the desired IDs to the new entities; preserve device/area and external references separately.

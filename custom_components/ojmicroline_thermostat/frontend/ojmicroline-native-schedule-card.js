@@ -329,28 +329,46 @@ class OJMicrolineNativeScheduleCard extends HTMLElement {
       const active = patch.active ?? event.active
       const nextDay = event.next_day ? patch.time === undefined ? " (next day)" : " (was next day; see preview)" : ""
       return this._draft
-        ? `<tr><th scope="row">${slot + 1}</th><td><input aria-label="Event ${slot + 1} time" data-slot="${slot}" data-field="time" type="time" step="900" value="${nativeEscape(time)}">${nextDay}</td><td><input aria-label="Event ${slot + 1} temperature in ${unit}" data-slot="${slot}" data-field="temperature" type="number" step="${unit === "F" ? "1" : "0.5"}" value="${nativeEscape(temperature)}"> °${unit}</td><td><input aria-label="Event ${slot + 1} active" data-slot="${slot}" data-field="active" data-locked="${slot === 0}" type="checkbox"${active ? " checked" : ""}${slot === 0 ? " disabled" : ""}>${slot === 0 ? " Always active" : ""}</td></tr>`
+        ? `<tr><th scope="row">${slot + 1}</th><td><span class="field-label" aria-hidden="true">Start</span><input aria-label="Event ${slot + 1} time" data-slot="${slot}" data-field="time" type="time" step="900" value="${nativeEscape(time)}">${nextDay}</td><td><span class="field-label" aria-hidden="true">Temperature</span><span class="temperature-control"><input aria-label="Event ${slot + 1} temperature in ${unit}" data-slot="${slot}" data-field="temperature" type="number" step="${unit === "F" ? "1" : "0.5"}" value="${nativeEscape(temperature)}"><span>°${unit}</span></span></td><td class="schedule-active"><label class="active-control"><input aria-label="Event ${slot + 1} active" data-slot="${slot}" data-field="active" data-locked="${slot === 0}" type="checkbox"${active ? " checked" : ""}${slot === 0 ? " disabled" : ""}><span${slot === 0 ? "" : ' class="field-label"'}>${slot === 0 ? "Always active" : "Active"}</span></label></td></tr>`
         : `<tr><th scope="row">${slot + 1}</th><td>${nativeEscape(time)}${nextDay}</td><td>${nativeEscape(temperature)} °${unit}</td><td>${active ? "Active" : "Inactive"}</td></tr>`
     }).join("")
     this.shadowRoot.innerHTML = `<style>
-      ha-card { padding: 16px }
+      :host { display: block; min-width: 0 }
+      ha-card { padding: 16px; box-sizing: border-box; width: 100%; min-width: 0 }
       h3 { margin: 0 0 12px }
       p { line-height: 1.4 }
       .hint { color: var(--secondary-text-color); font-size: 0.85em }
       table { width: 100%; border-collapse: collapse }
       th, td { padding: 8px 4px; text-align: left; border-bottom: 1px solid var(--divider-color) }
-      input, select, button { font: inherit; color: var(--primary-text-color); background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 4px; padding: 6px }
+      input, select, button { font: inherit; color: var(--primary-text-color); background: var(--card-background-color); border: 1px solid var(--divider-color); border-radius: 4px; padding: 6px; box-sizing: border-box; min-width: 0; max-width: 100% }
       input[type=number] { width: 5em }
+      .field-label { display: none }
+      .temperature-control { display: inline-flex; align-items: center; gap: 4px }
+      .active-control { display: inline-flex; align-items: center; gap: 4px }
       button { cursor: pointer; margin: 12px 8px 0 0 }
       button:disabled { opacity: 0.5; cursor: default }
       #status { min-height: 1.5em }
       #preview-result { overflow-x: auto }
-      @media (max-width: 420px) { th, td { padding: 6px 2px } input[type=number] { width: 4em } }
+      @media (max-width: 420px) {
+        th, td { padding: 6px 2px }
+        input[type=number] { width: 4em }
+        .schedule-table.is-editing, .schedule-table.is-editing tbody { display: block }
+        .schedule-table.is-editing thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap }
+        .schedule-table.is-editing tbody tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--divider-color) }
+        .schedule-table.is-editing tbody th, .schedule-table.is-editing tbody td { padding: 0; border: 0; min-width: 0 }
+        .schedule-table.is-editing tbody th, .schedule-table.is-editing .schedule-active { grid-column: 1 / -1 }
+        .schedule-table.is-editing tbody th::before { content: "Event " }
+        .schedule-table.is-editing .field-label { display: block; margin-bottom: 4px; color: var(--secondary-text-color); font-size: 0.85em }
+        .schedule-table.is-editing input[type=time] { width: 100%; min-height: 44px }
+        .schedule-table.is-editing .temperature-control { display: flex }
+        .schedule-table.is-editing input[type=number] { width: 100%; flex: 1 1 0; min-height: 44px }
+        .schedule-table.is-editing .active-control { display: flex; min-height: 44px }
+      }
     </style><ha-card>
       <h3>${nativeEscape(title)}</h3>
       <p class="hint">Times follow the thermostat's local clock. Reported UTC offset: ${nativeEscape(offset || "unknown")}. Daylight-saving behavior is not established here.</p>
       <label>Day <select id="day">${options}</select></label>
-      <table><thead><tr><th>Event</th><th>Start</th><th>Temperature</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>
+      <table class="schedule-table${this._draft ? " is-editing" : ""}"><thead><tr><th>Event</th><th>Start</th><th>Temperature</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="hint">Six stored slots per day. Edit times in 15-minute steps. Event 1 stays active. Inactive slots retain their settings. Editing the program does not activate schedule mode.</p>
       ${this._draft ? '<button id="preview">Preview changes</button><button id="save" disabled>Save stored program</button><button id="refresh">Refresh / discard draft</button>' : '<button id="edit">Edit stored program</button>'}
       <p id="status" role="status" aria-live="polite"></p><div id="preview-result"></div>

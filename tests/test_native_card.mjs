@@ -151,6 +151,15 @@ test("renders six stable slots and locks the first active event", () => {
   assert.equal(active[1].checked, false)
   assert.match(card.shadowRoot.innerHTML, /step="900"/)
   assert.match(card.shadowRoot.innerHTML, /thermostat's local clock/)
+  assert.match(card.shadowRoot.innerHTML, /<table class="schedule-table is-editing">/)
+  assert.equal([...card.shadowRoot.innerHTML.matchAll(/class="field-label" aria-hidden="true">Start/g)].length, 6)
+  assert.equal([...card.shadowRoot.innerHTML.matchAll(/class="field-label" aria-hidden="true">Temperature/g)].length, 6)
+  for (let slot = 0; slot < 6; slot++) {
+    for (const field of ["time", "temperature", "active"]) {
+      assert.equal(card.shadowRoot.inputs.filter((input) => input.dataset.slot === String(slot) && input.dataset.field === field).length, 1)
+      assert.match(card.shadowRoot.innerHTML, new RegExp(`aria-label="Event ${slot + 1} ${field}`))
+    }
+  }
 })
 
 test("displaying Fahrenheit and editing time preserve all native temperatures", async () => {
@@ -255,6 +264,28 @@ test("DOM input listeners generate sparse changes", () => {
   time.value = "10:15"
   time.emit("input")
   assert.deepEqual(plain(card._patches()), [{ day: "monday", slot: 2, time: "10:15" }])
+})
+
+test("day selection preserves accessible editor controls and cancel restores the read-only table", () => {
+  const { card, requests } = setup()
+  assert.match(card.shadowRoot.innerHTML, /<table class="schedule-table">/)
+  card._startEdit()
+  card._changeField("monday", 2, "time", "10:15")
+  const day = card.shadowRoot.querySelector("#day")
+  day.value = "tuesday"
+  day.emit("change")
+  assert.equal(card.shadowRoot.inputs.length, 18)
+  const temperature = card.shadowRoot.inputs.find((input) => input.dataset.slot === "3" && input.dataset.field === "temperature")
+  temperature.value = "68"
+  temperature.emit("input")
+  assert.deepEqual(plain(card._patches()), [
+    { day: "monday", slot: 2, time: "10:15" },
+    { day: "tuesday", slot: 3, temperature: 68 },
+  ])
+  card.shadowRoot.querySelector("#refresh").emit("click")
+  assert.match(card.shadowRoot.innerHTML, /<table class="schedule-table">/)
+  assert.equal(card.shadowRoot.inputs.length, 0)
+  assert.equal(requests.length, 0)
 })
 
 test("invalid edited times or empty temperatures never reach the action", async () => {
